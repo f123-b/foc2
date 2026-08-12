@@ -9,6 +9,8 @@ $electron = Join-Path $hostRoot 'node_modules\electron\dist\electron.exe'
 
 Push-Location $hostRoot
 try {
+    $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+    $env:npm_config_registry = 'https://registry.npmmirror.com'
     if (!(Test-Path -LiteralPath $electron)) {
         & $npm ci
         if ($LASTEXITCODE -ne 0) { throw 'npm dependency installation failed.' }
@@ -17,5 +19,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Windows portable build failed.' }
     Write-Host "Windows desktop build ready: $hostRoot\dist" -ForegroundColor Green
 } finally {
+    Remove-Item Env:ELECTRON_MIRROR -ErrorAction SilentlyContinue
+    Remove-Item Env:npm_config_registry -ErrorAction SilentlyContinue
     Pop-Location
 }
