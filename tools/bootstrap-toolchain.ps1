@@ -50,10 +50,10 @@ function Install-ToolArchive {
     if (!(Test-Path -LiteralPath $archive) -or $Force -or $archiveIsEmpty) {
         Write-Status "Downloading $Name..."
         $partial = "$archive.partial"
-        if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+        # Keep a partial archive so interrupted downloads can be resumed safely.
         $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
         if ($curl) {
-            & $curl.Source --fail --location --retry 3 --retry-delay 2 --connect-timeout 30 --output $partial $Uri
+            & $curl.Source --fail --location --retry 5 --retry-delay 2 --connect-timeout 30 --continue-at - --output $partial $Uri
             if ($LASTEXITCODE -ne 0) { throw "Failed to download $Name." }
         } else {
             Invoke-WebRequest -Uri $Uri -OutFile $partial
