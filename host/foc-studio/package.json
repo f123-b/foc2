@@ -1,0 +1,25 @@
+{
+  "name": "foc-studio-host",
+  "version": "0.1.0",
+  "description": "ODrive V3.6 single-axis FOC control and diagnostics studio",
+  "author": "FOC Studio Project",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "test": "node test_protocol.mjs",
+    "desktop": "electron .",
+    "desktop:dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.focstudio.odrive",
+    "productName": "FOC Studio",
+    "directories": { "output": "dist" },
+    "files": ["index.html", "app.js", "protocol.js", "styles.css", "desktop/**/*", "package.json"],
+    "win": { "target": "portable", "artifactName": "FOC-Studio-${version}.exe", "signAndEditExecutable": false }
+  }
+}
