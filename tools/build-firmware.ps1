@@ -62,6 +62,10 @@ foreach ($relativePath in $generatedFiles) {
 
 Push-Location $firmwareRoot
 try {
+    if (!(Test-Path -LiteralPath (Join-Path $firmwareRoot '.tup'))) {
+        & (Join-Path $env:TUP_ROOT 'bin\tup.exe') init
+        if ($LASTEXITCODE -ne 0) { throw 'Tup project initialization failed.' }
+    }
     & (Join-Path $env:TUP_ROOT 'bin\tup.exe') generate --config $effectiveConfigName build-firmware.bat
     if ($LASTEXITCODE -ne 0) { throw 'Tup offline script generation failed.' }
 
