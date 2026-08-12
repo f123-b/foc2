@@ -32,7 +32,7 @@ app.whenReady().then(() => {
     const selected = dialog.showMessageBoxSync(mainWindow, {
       type: 'question',
       title: '选择 USB CDC 串口',
-      message: '请选择 ODrive USB CDC 设备',
+      message: '请选择 FOC Studio 控制器 USB CDC 设备',
       buttons: labels,
       cancelId: labels.length - 1,
       defaultId: 0,

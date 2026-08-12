@@ -10,32 +10,32 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $profiles = @{
     'abz-low-speed-v3' = @{
         Label = 'ABZ dither-resistant breakaway and bounded-integrator v3'
-        Bin = 'output\firmware\abz-low-speed-v3-16C7FC68\ODriveFirmware-abz-low-speed-v3.bin'
-        Hex = 'output\firmware\abz-low-speed-v3-16C7FC68\ODriveFirmware-abz-low-speed-v3.hex'
+        Bin = 'output\firmware\abz-low-speed-v3-16C7FC68\FOCStudioFirmware-abz-low-speed-v3.bin'
+        Hex = 'output\firmware\abz-low-speed-v3-16C7FC68\FOCStudioFirmware-abz-low-speed-v3.hex'
         BinSha256 = '4F94AD292F947A2823140CCA739DA0DC7BB8F96EC2973145012C9A67E6453F15'
         HexSha256 = '16C7FC683EF64573BF9C36050B82F571FD0EBAA42A83CA80F038D561CBB62011'
         StLinkChecksum = [uint32]0x0176D6EC
     }
     'abz-low-speed-v2' = @{
         Label = 'ABZ count-aware low-speed and position trajectory v2'
-        Bin = 'output\firmware\abz-low-speed-v2-7B639E84\ODriveFirmware-abz-low-speed-v2.bin'
-        Hex = 'output\firmware\abz-low-speed-v2-7B639E84\ODriveFirmware-abz-low-speed-v2.hex'
+        Bin = 'output\firmware\abz-low-speed-v2-7B639E84\FOCStudioFirmware-abz-low-speed-v2.bin'
+        Hex = 'output\firmware\abz-low-speed-v2-7B639E84\FOCStudioFirmware-abz-low-speed-v2.hex'
         BinSha256 = '154490A28F9F9B9E23EF99C41D1EBEFDB33808525F87B86CC329F32F5FDB354E'
         HexSha256 = '7B639E8419B05ACA2D485666B38BF139AACE8E20DB76E619B4180925DA7321F0'
         StLinkChecksum = [uint32]0x0176BF16
     }
     'abz-low-speed-v1' = @{
         Label = 'ABZ low-speed and position trajectory v1'
-        Bin = 'output\firmware\abz-low-speed-v1-B79DB48A\ODriveFirmware-abz-low-speed-v1.bin'
-        Hex = 'output\firmware\abz-low-speed-v1-B79DB48A\ODriveFirmware-abz-low-speed-v1.hex'
+        Bin = 'output\firmware\abz-low-speed-v1-B79DB48A\FOCStudioFirmware-abz-low-speed-v1.bin'
+        Hex = 'output\firmware\abz-low-speed-v1-B79DB48A\FOCStudioFirmware-abz-low-speed-v1.hex'
         BinSha256 = '4FC81E559240377B96A2D9C7A01D51683CF6545F3D751077DDE9D96F86383BA8'
         HexSha256 = 'B79DB48A96B1C7B32C67BD962E75A66E0ED49C07B2F165BC01CC056DF906CC50'
         StLinkChecksum = [uint32]0x01739645
     }
     'baseline-speed-22' = @{
         Label = 'verified speed baseline 22 rollback'
-        Bin = 'output\firmware\speed-baseline-22-1CE11A09\ODriveFirmware-speed-baseline-22.bin'
-        Hex = 'output\firmware\speed-baseline-22-1CE11A09\ODriveFirmware-speed-baseline-22.hex'
+        Bin = 'output\firmware\speed-baseline-22-1CE11A09\FOCStudioFirmware-speed-baseline-22.bin'
+        Hex = 'output\firmware\speed-baseline-22-1CE11A09\FOCStudioFirmware-speed-baseline-22.hex'
         BinSha256 = '828AED340EEBBECB992CF91BD26FC70BEA63261D056875CBE24A5C1CD104072B'
         HexSha256 = '1CE11A09F22C67384EAC35C24A075BACC1B81C31C2D346F5B7B3C47AEAAA8569'
         StLinkChecksum = [uint32]0x01717CDF
@@ -71,9 +71,12 @@ Write-Host "Verified firmware profile: $Profile ($($selectedProfile.Label))" -Fo
 Write-Host "  BIN $actualBinSha256"
 Write-Host "  HEX $actualHexSha256"
 Write-Host ('  ST-LINK checksum 0x{0:X8}' -f $expectedStLinkChecksum)
-Write-Host 'Disconnect motor power and mechanical load before programming ODrive V3.6.' -ForegroundColor Yellow
+Write-Host 'Disconnect motor power and mechanical load before programming the FOC Studio controller.' -ForegroundColor Yellow
 
-$stLinkCli = 'D:\Odrive\ST-LINK Utility\ST-LINK_CLI.exe'
+$stLinkCli = (Get-Command ST-LINK_CLI.exe -ErrorAction SilentlyContinue).Source
+if (!$stLinkCli) {
+    throw 'ST-LINK_CLI.exe was not found on PATH. Install ST-LINK tools or pass it on PATH.'
+}
 if (Test-Path -LiteralPath $stLinkCli) {
     # This is the same program/verify operation shown in STM32 ST-LINK Utility.
     & $stLinkCli -c SWD -P $firmwareHex -V after_programming -Rst

@@ -181,7 +181,7 @@ build{
 
 
 build{
-    name='ODriveFirmware',
+    name='FOCStudioFirmware',
     toolchains={toolchain},
     --toolchains={LLVMToolchain('x86_64', {'-Ofast'}, {'-flto'})},
     packages={'stm_platform'},

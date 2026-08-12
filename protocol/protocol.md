@@ -1,7 +1,7 @@
 # FOC Studio USB CDC 通信协议
 
-固件通过 ODrive USB CDC 接口传输以换行结束的 ASCII 命令，波特率为 115200。
-标准 ODrive v0.5.1 命令仍可使用，包括 `r`、`w`、`p`、`v`、`c`、`u`、
+固件通过 USB CDC 接口传输以换行结束的 ASCII 命令，波特率为 115200。
+基础 ASCII 命令仍可使用，包括 `r`、`w`、`p`、`v`、`c`、`u`、
 `ss`、`se` 和 `sr`。FOC Studio 额外增加以下命令：
 
 | 命令 | 响应 | 作用 |
@@ -53,7 +53,7 @@
 - 五类 `*_error` 用于解析轴聚合故障对应的具体原因。
 - `control_mode`：1 为扭矩、2 为速度、3 为位置控制。
 - `phase_a_voltage`、`phase_b_voltage`、`phase_c_voltage`：由电流环最终的
-  `v_alpha/v_beta` 反 Clarke 变换得到的 PWM 指令相电压，单位 V。ODrive V3.6
+  `v_alpha/v_beta` 反 Clarke 变换得到的 PWM 指令相电压，单位 V。V3.6 控制板
   没有三相电压 ADC，因此这些字段不是示波器探头实测电压；`Idle` 或 PWM 关闭时为 0。
 - `id_measured`、`iq_setpoint`、`id_setpoint`：d/q 轴电流诊断量，单位 A；
   `Idle` 或 PWM 关闭时为 0。
@@ -74,7 +74,7 @@
 
 FOC Studio 的位置/速度/扭矩路径在切换控制模式时会清除未使用的前馈并清空速度积分。
 位置按钮发送 `t axis absolute_position`，固件每次把轨迹限制固定为 0.30 turn/s 和
-0.60 turn/s² 加减速，避免旧 NVM 参数产生过快移动；扭矩命令仍为 ODrive 原生
+0.60 turn/s² 加减速，避免旧 NVM 参数产生过快移动；扭矩命令仍走基础
 `c axis torque` 和 `PASSTHROUGH` 输入。
 
 速度模式临时使用 `VEL_RAMP`、速度增益 0.0025、速度积分 0.01、速度斜坡

@@ -12,7 +12,7 @@
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark">F</span>
-      <div><strong>FOC Studio</strong><span>ODrive V3.6 / M0</span></div>
+      <div><strong>FOC Studio</strong><span>单轴 FOC 控制器 / M0</span></div>
     </div>
     <div class="top-actions">
       <span id="connectionBadge" class="status-badge neutral">未连接</span>
@@ -27,7 +27,7 @@
     <aside class="sidebar">
       <div class="side-section">
         <span class="eyebrow">设备</span>
-        <div class="device-name">ODrive V3.6</div>
+        <div class="device-name">FOC Studio 控制器</div>
         <div class="device-subtitle">3505-KV650 · Axis M0</div>
       </div>
       <nav class="side-nav" aria-label="主导航">
@@ -165,12 +165,12 @@
           <div class="config-grid">
             <label>电流限制 / A<input data-config="axis0.motor.config.current_lim" value="2"></label><label>扭矩限制 / Nm<input data-config="axis0.motor.config.torque_lim" value="0.2"></label><label>速度限制 / turn/s<input data-config="axis0.controller.config.vel_limit" value="20"></label><label>电机方向（校准结果）<input data-config="axis0.motor.config.direction" value="0" readonly></label><label>相电阻 / Ω（校准结果）<input data-config="axis0.motor.config.phase_resistance" value="0.1" readonly></label><label>相电感 / H（校准结果）<input data-config="axis0.motor.config.phase_inductance" value="0.0000423" readonly></label><label>极对数（固定）<input data-config="axis0.motor.config.pole_pairs" value="10" readonly></label><label>编码器 CPR（由模式设置）<input data-config="axis0.encoder.config.cpr" value="16384" readonly></label><label>编码器带宽 / rad/s<input data-config="axis0.encoder.config.bandwidth" data-safe-value="100" value="100"></label><label>预校准电机（只读）<input data-config="axis0.motor.config.pre_calibrated" value="0" readonly></label><label>预校准编码器（只读）<input data-config="axis0.encoder.config.pre_calibrated" value="0" readonly></label><label>位置增益<input data-config="axis0.controller.config.pos_gain" data-safe-value="0.8" value="0.8"></label><label>速度增益<input data-config="axis0.controller.config.vel_gain" data-safe-value="0.0015" value="0.0015"></label><label>速度积分增益<input data-config="axis0.controller.config.vel_integrator_gain" data-safe-value="0.005" value="0.005"></label><label>速度斜坡 / turn/s²<input data-config="axis0.controller.config.vel_ramp_rate" data-safe-value="0.3" value="0.3"></label><label>电流环带宽 / rad/s<input data-config="axis0.motor.config.current_control_bandwidth" data-safe-value="500" value="500"></label><label>电流违规余量 / A（只读）<input data-config="axis0.motor.config.current_lim_margin" value="1" readonly></label>
           </div>
-          <div class="inline-status tuning-note"><b>写入保护：</b>必须先读取设备参数，再加载或修改参数。电机方向、极对数和 CPR 不参与批量写入。扭矩与位置使用 ODrive 原生控制路径；速度反馈低通只在速度模式临时启用。</div>
+          <div class="inline-status tuning-note"><b>写入保护：</b>必须先读取设备参数，再加载或修改参数。电机方向、极对数和 CPR 不参与批量写入。扭矩与位置使用稳定的基础控制路径；速度反馈低通只在速度模式临时启用。</div>
           <div class="config-section-title"><strong>制动电阻与回馈</strong><div class="button-row brake-presets"><button id="brakeOffPresetButton" class="button secondary">未接电阻</button><button id="brake5PresetButton" class="button secondary">5 Ω / 50 W 推荐</button><button id="brake2PresetButton" class="button secondary">2 Ω / 50 W 脉冲</button></div></div>
           <div class="config-grid brake-config-grid">
             <label>外接制动电阻 / Ω<input data-config="config.brake_resistance" type="number" min="0" max="20" step="0.1" value="0"></label><label>允许回馈后再制动 / A<input data-config="config.max_regen_current" type="number" min="0" max="10" step="0.1" value="0"></label><label>电源可吸收电流 / A<input data-config="config.dc_max_negative_current" type="number" min="-10" max="0" step="0.1" value="-0.000001"></label><label>过压制动斜坡<select data-config="config.enable_dc_bus_overvoltage_ramp"><option value="0" selected>关闭</option><option value="1">启用</option></select></label><label>斜坡起点 / V<input data-config="config.dc_bus_overvoltage_ramp_start" type="number" min="13" max="15" step="0.1" value="14"></label><label>斜坡终点 / V<input data-config="config.dc_bus_overvoltage_ramp_end" type="number" min="13.1" max="15.8" step="0.1" value="15.5"></label>
           </div>
-          <div id="configStatus" class="inline-status">只写入可编辑字段；相电阻、相电感和预校准标志不会被批量覆盖。</div><div id="brakePowerPreview" class="inline-status brake-note">未接制动电阻：保持 0 Ω 并关闭过压斜坡。</div><div class="inline-status brake-note">V3.6 上将电阻跨接在 DC+ 与 AUX 之间（无极性），绝不能接在 DC+ 与 DC- 之间。5 Ω / 50 W 更适合本项目；2 Ω / 50 W 只能承受短脉冲。</div><div class="inline-status wiring-note">AS5047P SPI3：CS 接 GPIO4 / PA3，SCK 接 PC10，MISO 接 PC11，MOSI 接 PC12；使用 3.3 V 逻辑并与 ODrive 共地。</div>
+          <div id="configStatus" class="inline-status">只写入可编辑字段；相电阻、相电感和预校准标志不会被批量覆盖。</div><div id="brakePowerPreview" class="inline-status brake-note">未接制动电阻：保持 0 Ω 并关闭过压斜坡。</div><div class="inline-status brake-note">目标板上将电阻跨接在 DC+ 与 AUX 之间（无极性），绝不能接在 DC+ 与 DC- 之间。5 Ω / 50 W 更适合本项目；2 Ω / 50 W 只能承受短脉冲。</div><div class="inline-status wiring-note">AS5047P SPI3：CS 接 GPIO4 / PA3，SCK 接 PC10，MISO 接 PC11，MOSI 接 PC12；使用 3.3 V 逻辑并与控制器共地。</div>
         </section>
       </section>
 

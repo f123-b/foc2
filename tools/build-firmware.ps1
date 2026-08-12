@@ -3,10 +3,11 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$firmwareRoot = Join-Path $projectRoot 'odrive-baseline\Firmware'
+$firmwareRoot = Join-Path $projectRoot 'firmware-target\Firmware'
 $buildRoot = Join-Path $firmwareRoot 'build'
-$expectedBuildRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot 'odrive-baseline\Firmware\build'))
+$expectedBuildRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot 'firmware-target\Firmware\build'))
 
+& (Join-Path $PSScriptRoot 'bootstrap-toolchain.ps1') -Quiet
 . (Join-Path $PSScriptRoot 'env.ps1')
 
 if (Test-Path -LiteralPath $buildRoot) {
@@ -67,9 +68,9 @@ try {
     & "$env:SystemRoot\System32\cmd.exe" /d /c build-firmware.bat
     if ($LASTEXITCODE -ne 0) { throw 'Firmware build failed.' }
 
-    $elf = Join-Path $buildRoot 'ODriveFirmware.elf'
-    $hex = Join-Path $buildRoot 'ODriveFirmware.hex'
-    $bin = Join-Path $buildRoot 'ODriveFirmware.bin'
+    $elf = Join-Path $buildRoot 'FOCStudioFirmware.elf'
+    $hex = Join-Path $buildRoot 'FOCStudioFirmware.hex'
+    $bin = Join-Path $buildRoot 'FOCStudioFirmware.bin'
     foreach ($artifact in @($elf, $hex, $bin)) {
         if (!(Test-Path -LiteralPath $artifact)) { throw "Missing artifact: $artifact" }
     }

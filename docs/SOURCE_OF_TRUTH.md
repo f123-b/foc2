@@ -6,16 +6,16 @@
 
 | 区域 | 状态 | 责任 |
 |---|---|---|
-| `odrive-baseline/Firmware` | STM32 实际固件 | ODrive v0.5.1、板级 HAL、FreeRTOS、USB CDC、Axis、Encoder、Controller、Motor 与 PWM；`tools/build-firmware.ps1` 以此目录构建。 |
-| `firmware/` | portable snapshot | 小型 CMake 可测核心及一份 ODrive vendor 快照；它不是完整可烧录固件，也不会被 `build-firmware.ps1` 链接进 ELF。 |
+| `firmware-target/Firmware` | STM32 实际固件 | 经修改的上游 v0.5.1 基础、板级 HAL、FreeRTOS、USB CDC、Axis、Encoder、Controller、Motor 与 PWM；`tools/build-firmware.ps1` 以此目录构建。 |
+| `firmware/` | portable snapshot | 小型 CMake 可测核心及一份 upstream vendor 快照；它不是完整可烧录固件，也不会被 `build-firmware.ps1` 链接进 ELF。 |
 | `host/foc-studio/` | Windows host | Electron/Web Serial UI、协议解析、模拟设备和主机协议测试。 |
-| `protocol/` | 接口契约 | ASCII 命令与遥测格式；固件实现位于 `odrive-baseline/Firmware/communication/ascii_protocol.cpp`。 |
+| `protocol/` | 接口契约 | ASCII 命令与遥测格式；固件实现位于 `firmware-target/Firmware/communication/ascii_protocol.cpp`。 |
 | `tools/` | 构建/操作脚本 | 本地 toolchain、Tup、测试、桌面构建和 DFU 脚本。 |
-| `odrive-baseline/Firmware/Tests` | 固件侧单元测试 | doctest 测试；目前未由根目录 `test-project.ps1` 构建或执行。 |
+| `firmware-target/Firmware/Tests` | 固件侧单元测试 | doctest 测试；目前未由根目录 `test-project.ps1` 构建或执行。 |
 
 ## 配置来源与漂移
 
-首次启动、NVM 无效或擦除配置后，`odrive-baseline/Firmware/MotorControl/main.cpp::load_foc_studio_defaults()` 是实际 STM32 默认值来源。有效运行配置随后可由 NVM 和 ASCII/Fibre property 写入覆盖。
+首次启动、NVM 无效或擦除配置后，`firmware-target/Firmware/MotorControl/main.cpp::load_foc_studio_defaults()` 是实际 STM32 默认值来源。有效运行配置随后可由 NVM 和 ASCII/Fibre property 写入覆盖。
 
 `firmware/include/foc_config.hpp` 复制了极对数、电阻、电感、KV、力矩常数、带宽和 CPR，其中 `max_current_a = 17 A` 又不同于实际 bring-up 默认值 `2 A`。因为该文件不参与烧录固件，此类重复不会改变板上行为，却会误导测试、文档和以后移植，属于配置漂移风险。
 

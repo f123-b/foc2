@@ -21,6 +21,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Portable firmware test build failed.' }
 & ctest.exe --test-dir $portableBuildRoot --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Portable firmware tests failed.' }
 
+& (Join-Path $PSScriptRoot 'bootstrap-toolchain.ps1') -Quiet
 . (Join-Path $PSScriptRoot 'env.ps1')
 $smokeRoot = Join-Path $projectRoot 'firmware\arm-smoke'
 New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null

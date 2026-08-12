@@ -6,10 +6,10 @@
 - 仅允许在 `Idle` 状态执行的反馈模式切换；
 - 故障锁存安全状态机；
 - Windows 单元测试和 Cortex-M4 编译测试；
-- `vendor/odrive-v0.5.1` 中保留的 ODrive 电机、编码器、无感估算、控制器、
+- `vendor/upstream-v0.5.1` 中保留的基础电机、编码器、无感估算、控制器、
   底层驱动和 DRV8301 源码。
 
-完整 STM32 固件从 `../odrive-baseline/Firmware` 编译。即使只使用一个电机轴，启动
+完整 STM32 固件从 `../firmware-target/Firmware` 编译。即使只使用一个电机轴，启动
 代码、HAL、FreeRTOS、链接脚本、USB CDC 和 Fibre 类型信息仍是必要依赖。
 
 请使用：
