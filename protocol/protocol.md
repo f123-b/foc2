@@ -58,7 +58,7 @@
 - `id_measured`、`iq_setpoint`、`id_setpoint`：d/q 轴电流诊断量，单位 A；
   `Idle` 或 PWM 关闭时为 0。
 - `velocity_setpoint`：级联位置/速度控制器使用的速度给定，单位 turn/s；
-- `raw_velocity`、`window_velocity`：编码器 PLL 原始速度和 ABZ 10 ms 计数窗口速度，
+- `raw_velocity`、`window_velocity`：编码器 PLL 原始速度和 ABZ 15 ms 滚动计数窗口速度，
   单位 turn/s；非 ABZ 模式下窗口值仅用于诊断；
 - `velocity_integrator_torque`、`low_speed_torque`：速度积分和低速起动补偿各自贡献的
   转矩，单位 Nm；
@@ -79,11 +79,11 @@ FOC Studio 的位置/速度/扭矩路径在切换控制模式时会清除未使�
 `c axis torque` 和 `PASSTHROUGH` 输入。
 
 速度模式临时使用 `VEL_RAMP`、速度增益 0.0025、速度积分 0.01、速度斜坡
-0.3 turn/s²。ABZ 速度和位置级联环使用 10 ms 固定计数窗口，2 turn/s 以下保持窗口
+0.3 turn/s²。ABZ 速度和位置级联环使用 15 ms 滚动计数窗口，2.5 turn/s 以下保持窗口
 反馈，超过 2.5 turn/s 后才与 PLL 平滑混合；混合结果再经 6～12 Hz 速度相关低通后同时进入 P/I。低速起动恢复要求
 累计正向移动 3 个计数，原地计数回摆不会误判起转；低速越齿转矩采用
-0.0008～0.005 Nm 的平滑斜坡，ABZ 积分转矩限制在 0.0015～0.005 Nm。
-窗口速度只进入级联外环和速度遥测，
+0.0012～0.012 Nm 的平滑斜坡，ABZ 积分转矩限制在 0.0025～0.005 Nm。
+窗口速度采用 15 ms 滚动窗口，只进入级联外环和速度遥测，
 不改写编码器原始估算，因此扭矩模式、电流限速和 FOC 相位推进保持原路径。离开 ABZ
 速度/位置级联模式、急停、切换反馈模式或故障回到 Idle 后，固件立即清除低速状态。
 `ss` 只允许在所有轴均为 Idle 时执行，并会先恢复速度模式的临时参数。

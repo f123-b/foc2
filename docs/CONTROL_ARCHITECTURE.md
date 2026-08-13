@@ -20,31 +20,31 @@ FOC Studio / other host
 
 ## ABZ speed feedback path
 
-For incremental encoders, `Encoder::update()` maintains the normal ODrive PLL (`vel_estimate_`) and, only for diagnostics/cascaded ABZ control, a rolling 80-sample count sum. At the nominal 8 kHz current loop this is a 10 ms window:
+For incremental encoders, `Encoder::update()` maintains the normal PLL (`vel_estimate_`) and, only for diagnostics/cascaded ABZ control, a rolling 120-sample count sum. At the nominal 8 kHz current loop this is a 15 ms window:
 
 ```text
 timer count -> delta_enc -> shadow_count
                       +-> encoder PLL -> raw_velocity
-                      +-> 80-tick rolling sum / (4000 CPR * elapsed) -> window_velocity
+                      +-> 120-tick rolling sum / (4000 CPR * elapsed) -> window_velocity
 raw + window -> Controller::velocity_feedback_for_control()
-             -> command-speed blend: window below 1.50 turn/s, PLL above 1.75 turn/s
-             -> VelocityFeedbackFilter: 8 Hz at <=1 turn/s, linear to 15 Hz at 2 turn/s
+             -> command-speed blend: window below 2.50 turn/s, PLL above 4 turn/s
+             -> VelocityFeedbackFilter: 6 Hz at <=1 turn/s, linear to 12 Hz at 2 turn/s
              -> velocity error -> scheduled P + bounded I + optional low-speed compensation
              -> motor torque limit -> Motor::update()
 ```
 
-The command, not measured speed, selects the 1.50–1.75 turn/s blend. That prevents estimator chatter caused by count noise during a steady command. It also means acceleration, deceleration, reversal and position control can select an estimator region that does not match instantaneous rotor speed; this is an intentional but unvalidated trade-off.
+The command, not measured speed, selects the 2.50–4.00 turn/s blend. That prevents estimator chatter caused by count noise during a steady command. It also means acceleration, deceleration, reversal and position control can select an estimator region that does not match instantaneous rotor speed; this is an intentional but unvalidated trade-off.
 
 ## ABZ-specific stages and their consequences
 
 | Stage | Purpose | Cost/risk |
 |---|---|---|
-| 10 ms rolling window | Avoid PLL zero-speed deadband and update every control tick. | Quantized at 4000 CPR: one count per 10 ms equals 0.025 turn/s; moving window adds roughly half-window observation delay and correlated steps. |
-| Command-speed blend | Avoid estimator source toggling. | Linear value continuity but derivative discontinuity at 1.50/1.75; no hysteresis or acceleration-aware policy. |
-| 8–15 Hz one-pole LPF | Prevent P/I chasing edge impulses. | A first-order lag has material phase delay near its bandwidth, compounded with window delay; bandwidth changes continuously in value but has slope break at 1/2 turn/s. |
-| Gain schedule | Raises low-speed P while lowering I. | Continuous at 0.75/1.50 in value, but effective gains differ from host-visible configured values. |
-| I clamp | Limits stored energy to 0.0015–0.005 Nm. | Bounds windup and prevents a tooth-crossing release from becoming a speed impulse. |
-| LowSpeedCompensator | Supplies a 0.0008–0.005 Nm feed-forward/breakaway ramp while holding worsening I. | It is active only below 0.75 turn/s and fades with measured overspeed; the final threshold still needs HIL confirmation. |
+| 15 ms rolling window | Avoid PLL zero-speed deadband and update every control tick. | Quantized at 4000 CPR: one count per 15 ms equals 0.0167 turn/s; moving window adds roughly half-window observation delay and correlated steps. |
+| Command-speed blend | Avoid estimator source toggling. | Window feedback remains dominant below 2.5 turn/s and blends to PLL by 4 turn/s; command-based selection avoids estimator chatter. |
+| 6–12 Hz one-pole LPF | Prevent P/I chasing edge impulses. | A first-order lag has material phase delay near its bandwidth, compounded with window delay; bandwidth changes continuously in value but has slope break at 1/2 turn/s. |
+| Gain schedule | Raises low-speed P while lowering I. | Continuous at 1.25/2.00 in value, but effective gains differ from host-visible configured values. |
+| I clamp | Limits stored energy to 0.0025–0.005 Nm. | Bounds windup and prevents a tooth-crossing release from becoming a speed impulse. |
+| LowSpeedCompensator | Supplies a 0.0012–0.012 Nm feed-forward/breakaway ramp while holding worsening I. | It remains available through 1.5 turn/s and fades before 2 turn/s; the final threshold still needs HIL confirmation. |
 
 The present code has no abrupt value step in these linear blends, but it does have several slope and state transitions. A boundary test must measure final torque, not only individual gains.
 

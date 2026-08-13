@@ -608,8 +608,9 @@ bool Controller::update(float* torque_setpoint_output) {
 
     // ABZ at low mechanical speed has sparse count updates. A large integral
     // term then accumulates while the rotor is held by static friction and is
-    // released as one burst when a tooth is crossed. Use proportional torque
-    // for breakaway and taper to the normal speed gains above 1.5 turn/s.
+    // released as one burst when a tooth is crossed. Use a stronger, bounded
+    // proportional term through the 1.5 turn/s region and taper to the
+    // normal speed gains only at 2 turn/s.
     // This branch is deliberately limited to cascaded incremental-encoder
     // control; torque control and SPI/sensorless paths are unchanged.
     const bool cascaded_abz_mode =
@@ -619,9 +620,9 @@ bool Controller::update(float* torque_setpoint_output) {
     if (cascaded_abz_mode) {
         const float command_speed = std::abs(vel_des);
         const float high_speed_blend = std::clamp(
-                (command_speed - 0.75f) / 0.75f, 0.0f, 1.0f);
-        constexpr float low_speed_vel_gain = 0.0030f;
-        constexpr float low_speed_integrator_gain = 0.0020f;
+                (command_speed - 1.25f) / 0.75f, 0.0f, 1.0f);
+        constexpr float low_speed_vel_gain = 0.0055f;
+        constexpr float low_speed_integrator_gain = 0.0035f;
         vel_gain = low_speed_vel_gain + high_speed_blend *
                 (vel_gain - low_speed_vel_gain);
         vel_integrator_gain = low_speed_integrator_gain + high_speed_blend *
@@ -657,7 +658,7 @@ bool Controller::update(float* torque_setpoint_output) {
             // crossed its unstable sparse-count region.
             const float command_speed = std::abs(vel_des);
             const float speed_blend = std::clamp(
-                    (command_speed - 0.75f) / 0.75f, 0.0f, 1.0f);
+                    (command_speed - 1.50f) / 0.50f, 0.0f, 1.0f);
             // Start below unity to avoid a current step on the first run; the
             // map itself is bounded to +/-8 mNm during finalisation.
             anticogging_scale = 0.35f * speed_blend;
@@ -698,7 +699,7 @@ bool Controller::update(float* torque_setpoint_output) {
                 *vel_estimate_src, vel_des);
         float velocity_feedback = selected_velocity_feedback;
         if (cascaded_abz_mode) {
-            // The 10 ms count window and the PLL both contain count-edge
+            // The 15 ms count window and the PLL both contain count-edge
             // impulses. Condition their already speed-blended result before
             // either P or I sees it. The bandwidth rises toward 2 turn/s to
             // retain braking response while removing the 1 turn/s ripple.
@@ -721,12 +722,11 @@ bool Controller::update(float* torque_setpoint_output) {
         torque += proportional_torque;
 
         if (cascaded_abz_mode) {
-            // The breakaway helper is only for the sparse-count region.  It
-            // must be completely out of the loop before the normal 1 turn/s
-            // operating point, otherwise its friction kick is added on top of
-            // the regular velocity controller.
+            // Keep the breakaway helper active through 1.5 turn/s, where the
+            // rotor still needs static-friction torque. It fades out before
+            // the proven 2 turn/s operating point.
             const float low_speed_scale = std::clamp(
-                    (0.75f - std::abs(vel_des)) / 0.70f, 0.0f, 1.0f);
+                    (2.0f - std::abs(vel_des)) / 0.75f, 0.0f, 1.0f);
             if (low_speed_scale > 0.0f) {
                 const bool abz_position_mode =
                         config_.control_mode == CONTROL_MODE_POSITION_CONTROL;
@@ -835,8 +835,8 @@ bool Controller::update(float* torque_setpoint_output) {
             // stored two orders of magnitude more energy than the low-speed
             // loop and produced the measured 1-2 turn/s oscillation.
             const float release = std::clamp(
-                    (std::abs(vel_des) - 0.25f) / 1.75f, 0.0f, 1.0f);
-            const float integral_limit = 0.0015f + release * 0.0035f;
+                    (std::abs(vel_des) - 0.50f) / 1.50f, 0.0f, 1.0f);
+            const float integral_limit = 0.0025f + release * 0.0025f;
             vel_integrator_torque_ = std::clamp(
                     vel_integrator_torque_, -integral_limit, integral_limit);
         }

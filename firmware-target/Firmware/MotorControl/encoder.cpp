@@ -509,9 +509,10 @@ bool Encoder::update() {
     count_in_cpr_ = mod(count_in_cpr_, config_.cpr);
 
     if (mode_ == MODE_INCREMENTAL) {
-        // A rolling window keeps the same 10 ms measurement horizon as the
-        // validated baseline, but updates every control tick. This avoids the
-        // alternating count totals produced by non-overlapping 10 ms blocks.
+        // A rolling 15 ms window updates every control tick. The longer
+        // horizon gives 0.2--1.5 turn/s enough encoder edges for a useful
+        // feedback value and removes the one-window-to-the-next speed jumps
+        // that caused the 1.5 turn/s burst.
         const uint16_t index = incremental_velocity_history_index_;
         incremental_window_delta_count_ -= incremental_velocity_delta_history_[index];
         incremental_velocity_delta_history_[index] = delta_enc;

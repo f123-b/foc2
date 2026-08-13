@@ -18,7 +18,7 @@
 
 | 域 | 已覆盖 | 必须补充 |
 |---|---|---|
-| Encoder | 基础 CPR 常量 | 10 ms rolling window、4000 CPR quantization、reversal、int32 overflow、reset、invalid estimate。 |
+| Encoder | 基础 CPR 常量 | 15 ms rolling window、4000 CPR quantization、reversal、int32 overflow、reset、invalid estimate。 |
 | Filter | init/noise/step | bandwidth transition、NaN/Inf、period invalid。 |
 | Low speed | progress/stall/dither/recovery/reversal/zero/overspeed | overflow、timeout、mode exit、position activation/deactivation。 |
 | Controller | portable state machine only | estimator/gain/I-limit/compensation/final-torque continuity、saturation、reversal。 |
