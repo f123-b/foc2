@@ -321,7 +321,7 @@ function renderStatus() {
     .map(([label, value]) => `${label} 0x${(Number(value) >>> 0).toString(16).padStart(8, '0')}`)
     .join(' · ');
   const faultLabel = hasFault(state) ? `${faultSummary(state)} · ${faultCodes}` : '无故障';
-  dom.stateValue.textContent = state.axisState;
+  dom.stateValue.textContent = hasFault(state) ? '故障停机' : state.axisState;
   dom.faultValue.textContent = faultLabel;
   dom.faultValue.style.color = hasFault(state) ? 'var(--red)' : 'var(--green)';
   dom.velocityValue.textContent = state.velocity.toFixed(1);
