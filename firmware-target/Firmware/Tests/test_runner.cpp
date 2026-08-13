@@ -188,6 +188,24 @@ TEST_SUITE("low_speed_compensator") {
         CHECK(result.friction_torque > LowSpeedCompensator::running_torque);
     }
 
+    TEST_CASE("low speed hold remains through small tracking error") {
+        LowSpeedCompensator compensator;
+        LowSpeedCompensationResult result;
+        for (int i = 0; i < 12000; ++i) {
+            result = compensator.update(
+                    true, 1.0f, 0.5f, 0.35f, 0.15f, 0.0f,
+                    i / 10, 0.000125f);
+        }
+        const float held_torque = result.friction_torque;
+        for (int i = 0; i < 2000; ++i) {
+            result = compensator.update(
+                    true, 1.0f, 0.5f, 0.49f, 0.01f, 0.0f,
+                    1200 + i / 10, 0.000125f);
+        }
+        CHECK(result.friction_torque >= held_torque * 0.90f);
+        CHECK(result.friction_torque <= LowSpeedCompensator::breakaway_torque);
+    }
+
     TEST_CASE("count dither cannot release breakaway torque") {
         LowSpeedCompensator compensator;
         for (int i = 0; i < 12000; ++i) {
@@ -241,8 +259,8 @@ TEST_SUITE("low_speed_compensator") {
         }
         CHECK(result.state == LowSpeedCompensator::STATE_RUNNING);
         CHECK_FALSE(result.hold_integrator);
-        CHECK(result.friction_torque == doctest::Approx(
-                LowSpeedCompensator::running_torque).epsilon(0.03f));
+        CHECK(result.friction_torque >= LowSpeedCompensator::running_torque);
+        CHECK(result.friction_torque <= LowSpeedCompensator::soft_breakaway_torque);
     }
 
     TEST_CASE("removes drive torque during overspeed without changing sign") {

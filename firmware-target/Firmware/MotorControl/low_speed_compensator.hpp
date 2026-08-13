@@ -44,14 +44,20 @@ public:
     // Keep enough torque after breakaway to stay above static friction at
     // 0.2--1.0 turn/s; otherwise the rotor stops again as soon as the ramp
     // enters recovery.
-    static constexpr float running_torque = 0.0025f;
-    static constexpr float soft_breakaway_torque = 0.0070f;
-    static constexpr float breakaway_torque = 0.0120f;
+    static constexpr float running_torque = 0.0040f;
+    static constexpr float soft_breakaway_torque = 0.0085f;
+    static constexpr float breakaway_torque = 0.0140f;
     static constexpr float torque_rise_rate = 0.0180f;
     static constexpr float torque_fall_rate = 0.60f;
     static constexpr float overspeed_fade_band = 0.12f;
     static constexpr float error_assist_gain = 0.020f;
     static constexpr float overspeed_confirm_time = 0.003f;
+    // A bounded low-speed hold term replaces the normal velocity integrator,
+    // which is intentionally clamped in the sparse-count region.  It builds
+    // slowly from persistent positive error and releases quickly on overspeed.
+    static constexpr float speed_hold_gain = 0.12f;
+    static constexpr float speed_hold_decay = 0.60f;
+    static constexpr float speed_hold_limit = 0.0090f;
 
     void clear() {
         state_ = STATE_IDLE;
@@ -65,6 +71,7 @@ public:
         breakaway_start_count_ = 0;
         recovery_ready_time_ = 0.0f;
         overspeed_time_ = 0.0f;
+        speed_hold_torque_ = 0.0f;
     }
 
     LowSpeedCompensationResult update(bool active,
@@ -169,16 +176,26 @@ public:
             recovery_time_ += period;
         }
 
+        const float forward_error = velocity_error * direction;
         // A few encoder counts can be real motion that is still below the
         // requested speed.  Keep building torque from the positive velocity
         // error instead of treating those counts as proof that breakaway is
         // complete.  The assist is bounded by the same breakaway ceiling.
         if (state_ == STATE_RUNNING || state_ == STATE_RECOVERING) {
-            const float forward_error = std::max(0.0f, velocity_error * direction);
+            if (forward_error > 0.01f) {
+                speed_hold_torque_ += speed_hold_gain * forward_error * period;
+            } else if (forward_error < -0.02f) {
+                speed_hold_torque_ -= speed_hold_decay * period;
+            }
+            speed_hold_torque_ = std::clamp(
+                    speed_hold_torque_, 0.0f, speed_hold_limit);
+            const float positive_error = std::max(0.0f, forward_error);
             target_magnitude += std::min(
                     breakaway_torque - running_torque,
-                    error_assist_gain * forward_error);
+                    error_assist_gain * positive_error);
+            target_magnitude += speed_hold_torque_;
         }
+        target_magnitude = std::min(target_magnitude, breakaway_torque);
 
         // Remove feed-forward continuously once the rotor passes the command.
         const float overspeed = std::max(
@@ -200,13 +217,13 @@ public:
         compensation_magnitude_ = slew(
                 compensation_magnitude_, target_magnitude,
                 torque_rise_rate, torque_fall_rate, period);
+        const float running_target = running_torque + speed_hold_torque_;
         if (state_ == STATE_RECOVERING &&
                 recovery_time_ >= recovery_min_time &&
-                compensation_magnitude_ <= running_torque + 0.0001f) {
-            state_ = STATE_RUNNING;
+                compensation_magnitude_ <= running_target + 0.0001f) {
+                state_ = STATE_RUNNING;
         }
 
-        const float forward_error = velocity_error * direction;
         result.friction_torque = direction * compensation_magnitude_;
         result.hold_integrator =
                 (state_ == STATE_BREAKAWAY || state_ == STATE_RECOVERING ||
@@ -239,6 +256,7 @@ private:
     int32_t breakaway_start_count_ = 0;
     float recovery_ready_time_ = 0.0f;
     float overspeed_time_ = 0.0f;
+    float speed_hold_torque_ = 0.0f;
 };
 
 #endif // __LOW_SPEED_COMPENSATOR_HPP

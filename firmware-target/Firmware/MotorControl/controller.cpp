@@ -621,7 +621,7 @@ bool Controller::update(float* torque_setpoint_output) {
         const float command_speed = std::abs(vel_des);
         const float high_speed_blend = std::clamp(
                 (command_speed - 1.00f) / 0.75f, 0.0f, 1.0f);
-        constexpr float low_speed_vel_gain = 0.0022f;
+        constexpr float low_speed_vel_gain = 0.0035f;
         constexpr float low_speed_integrator_gain = 0.0010f;
         vel_gain = low_speed_vel_gain + high_speed_blend *
                 (vel_gain - low_speed_vel_gain);
@@ -734,11 +734,13 @@ bool Controller::update(float* torque_setpoint_output) {
         torque += proportional_torque;
 
         if (cascaded_abz_mode) {
-            // Use the helper only through the static-friction range. It is
-            // full-strength up to 1 turn/s and fades out by 1.5 turn/s;
-            // above that point the normal velocity loop owns the torque.
+            // Keep the helper active through the sparse-count range. It is
+            // full-strength up to 1 turn/s and fades out by 2 turn/s;
+            // this prevents the 1.0--1.5 turn/s commands from falling into
+            // the gap between static-friction compensation and the dense
+            // velocity loop.
             const float low_speed_scale = std::clamp(
-                    (1.50f - std::abs(vel_des)) / 0.50f, 0.0f, 1.0f);
+                    (2.00f - std::abs(vel_des)) / 1.00f, 0.0f, 1.0f);
             if (low_speed_scale > 0.0f) {
                 const bool abz_position_mode =
                         config_.control_mode == CONTROL_MODE_POSITION_CONTROL;
