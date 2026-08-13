@@ -137,7 +137,7 @@ TEST_SUITE("low_speed_compensator") {
             if (i % 10 == 0)
                 ++count;
             result = compensator.update(
-                    true, 1.0f, 0.2f, 0.2f, 0.0f, 0.0f,
+                    true, 1.0f, 1.5f, 1.5f, 0.0f, 0.0f,
                     count, 0.000125f);
         }
         CHECK(result.state == LowSpeedCompensator::STATE_RUNNING);
@@ -180,6 +180,22 @@ TEST_SUITE("low_speed_compensator") {
         }
         CHECK(nominal_result.friction_torque == doctest::Approx(
                 LowSpeedCompensator::nominal_breakaway_torque).epsilon(0.02f));
+    }
+
+    TEST_CASE("low speed running torque stays above static friction") {
+        CHECK(LowSpeedCompensator::running_torque_for_command(0.5f) ==
+                doctest::Approx(
+                        LowSpeedCompensator::nominal_breakaway_torque)
+                        .epsilon(0.02f));
+        CHECK(LowSpeedCompensator::running_torque_for_command(1.0f) ==
+                doctest::Approx(
+                        LowSpeedCompensator::nominal_breakaway_torque)
+                        .epsilon(0.02f));
+        CHECK(LowSpeedCompensator::running_torque_for_command(1.25f) ==
+                doctest::Approx(0.0090f).epsilon(0.02f));
+        CHECK(LowSpeedCompensator::running_torque_for_command(1.5f) ==
+                doctest::Approx(LowSpeedCompensator::running_torque)
+                        .epsilon(0.02f));
     }
 
     TEST_CASE("isolated count edges still confirm a stall") {
@@ -286,8 +302,9 @@ TEST_SUITE("low_speed_compensator") {
         }
         CHECK(result.state == LowSpeedCompensator::STATE_RUNNING);
         CHECK_FALSE(result.hold_integrator);
-        CHECK(result.friction_torque >= LowSpeedCompensator::running_torque);
-        CHECK(result.friction_torque <= LowSpeedCompensator::soft_breakaway_torque);
+        CHECK(result.friction_torque >=
+                LowSpeedCompensator::running_torque_for_command(0.2f));
+        CHECK(result.friction_torque <= LowSpeedCompensator::breakaway_torque);
     }
 
     TEST_CASE("removes drive torque during overspeed without changing sign") {

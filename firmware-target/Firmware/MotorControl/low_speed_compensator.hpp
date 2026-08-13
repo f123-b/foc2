@@ -54,17 +54,35 @@ public:
     // region.
     static constexpr float breakaway_torque = 0.0180f;
     static constexpr float nominal_breakaway_torque = 0.0140f;
+    // Once the rotor has crossed a tooth, do not immediately fall back to
+    // the 4 mNm running value.  That value is adequate above the sparse-count
+    // region, but it lets this motor stop again at 0.2--1.0 turn/s.  Keep the
+    // nominal hold torque through 1 turn/s and taper it out by 1.5 turn/s;
+    // the controller's separate low-speed fade still keeps the added torque
+    // out of the normal 1.5--2 turn/s operating band.
+    static constexpr float low_speed_hold_end = 1.0f;
+    static constexpr float low_speed_hold_fade_end = 1.5f;
     static constexpr float torque_rise_rate = 0.0180f;
     static constexpr float torque_fall_rate = 0.60f;
     static constexpr float overspeed_fade_band = 0.12f;
     static constexpr float error_assist_gain = 0.020f;
-    static constexpr float overspeed_confirm_time = 0.003f;
+    // A single filtered ABZ edge can look like an overspeed sample for a few
+    // milliseconds.  Do not unload the hold torque until the excess speed is
+    // persistent; the independent controller overspeed fault remains armed.
+    static constexpr float overspeed_confirm_time = 0.012f;
     // A bounded low-speed hold term replaces the normal velocity integrator,
     // which is intentionally clamped in the sparse-count region.  It builds
     // slowly from persistent positive error and releases quickly on overspeed.
     static constexpr float speed_hold_gain = 0.12f;
     static constexpr float speed_hold_decay = 0.60f;
     static constexpr float speed_hold_limit = 0.0090f;
+
+    static float running_torque_for_command(float command_velocity) {
+        const float command_speed = std::abs(command_velocity);
+        const float hold_blend = low_speed_hold_blend(command_speed);
+        return running_torque + hold_blend *
+                (nominal_breakaway_torque - running_torque);
+    }
 
     void clear() {
         state_ = STATE_IDLE;
@@ -168,7 +186,11 @@ public:
             breakaway_start_count_ = progress_count_;
         }
 
-        float target_magnitude = running_torque;
+        const float base_running_torque =
+                running_torque_for_command(direction_command);
+        const float low_speed_hold_blend =
+                low_speed_hold_blend_for_command(direction_command);
+        float target_magnitude = base_running_torque;
         if (state_ == STATE_BREAKAWAY) {
             const float soft_blend = std::clamp(
                     breakaway_time_ / soft_breakaway_ramp_time, 0.0f, 1.0f);
@@ -194,12 +216,14 @@ public:
             } else if (forward_error < -0.02f) {
                 speed_hold_torque_ -= speed_hold_decay * period;
             }
+            const float command_hold_limit =
+                    speed_hold_limit * low_speed_hold_blend;
             speed_hold_torque_ = std::clamp(
-                    speed_hold_torque_, 0.0f, speed_hold_limit);
+                    speed_hold_torque_, 0.0f, command_hold_limit);
             const float positive_error = std::max(0.0f, forward_error);
             target_magnitude += std::min(
                     breakaway_torque - running_torque,
-                    error_assist_gain * positive_error);
+                    error_assist_gain * positive_error * low_speed_hold_blend);
             target_magnitude += speed_hold_torque_;
         }
         const float low_speed_ceiling = nominal_breakaway_torque +
@@ -227,7 +251,7 @@ public:
         compensation_magnitude_ = slew(
                 compensation_magnitude_, target_magnitude,
                 torque_rise_rate, torque_fall_rate, period);
-        const float running_target = running_torque + speed_hold_torque_;
+        const float running_target = base_running_torque + speed_hold_torque_;
         if (state_ == STATE_RECOVERING &&
                 recovery_time_ >= recovery_min_time &&
                 compensation_magnitude_ <= running_target + 0.0001f) {
@@ -248,6 +272,17 @@ public:
     State state() const { return state_; }
 
 private:
+    static float low_speed_hold_blend(float command_speed) {
+        return std::clamp(
+                (low_speed_hold_fade_end - command_speed) /
+                        (low_speed_hold_fade_end - low_speed_hold_end),
+                0.0f, 1.0f);
+    }
+
+    static float low_speed_hold_blend_for_command(float command_velocity) {
+        return low_speed_hold_blend(std::abs(command_velocity));
+    }
+
     static float slew(float value, float target, float rise_rate,
                       float fall_rate, float period) {
         const float rate = target >= value ? rise_rate : fall_rate;
