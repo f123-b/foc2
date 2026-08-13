@@ -2,6 +2,13 @@
 #include "odrive_main.h"
 #include <algorithm>
 
+// FOC Studio uses one characterised ABZ velocity profile for both normal
+// speed commands and the cogging-map scan.  Keeping these values together is
+// important: a map measured at a different speed contains the velocity-loop
+// transient and cannot be reused as a feed-forward at the requested speed.
+static constexpr float FOC_STUDIO_ABZ_SPEED = 2.0f;       // turn/s
+static constexpr float FOC_STUDIO_ABZ_RAMP_RATE = 0.3f;   // turn/s^2
+
 Controller::Controller(Config_t& config) :
     config_(config)
 {
@@ -144,10 +151,12 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
                                              : CONTROL_MODE_POSITION_CONTROL;
         config_.input_mode = velocity_only ? INPUT_MODE_VEL_RAMP : INPUT_MODE_PASSTHROUGH;
         if (velocity_only) {
-            // A slower scan gives the ABZ window estimator time to settle and
-            // leaves current/velocity headroom for the reverse transition.
-            config_.vel_limit = std::min(1.5f, config_.vel_limit);
-            config_.vel_ramp_rate = 0.45f;
+            // Use exactly the same speed/ramp profile as FOC Studio's normal
+            // ABZ speed mode.  Sampling at a separate 1.2/1.5 turn/s profile
+            // produces a map that changes the loop gain and speed when it is
+            // later applied at the 2 turn/s operating point.
+            config_.vel_limit = std::min(2.2f, config_.vel_limit);
+            config_.vel_ramp_rate = FOC_STUDIO_ABZ_RAMP_RATE;
             anticogging_scan_phase_ = ANTICOGGING_SCAN_RAMP_FORWARD;
             anticogging_scan_start_pos_ = anticogging_calibration_base_pos_;
             anticogging_reverse_start_pos_ = anticogging_calibration_base_pos_;
@@ -155,7 +164,7 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
             std::fill(anticogging_forward_map_, anticogging_forward_map_ + 3600, 0);
             std::fill(anticogging_forward_count_, anticogging_forward_count_ + 3600, 0);
             std::fill(anticogging_reverse_count_, anticogging_reverse_count_ + 3600, 0);
-            input_vel_ = 1.2f;
+            input_vel_ = FOC_STUDIO_ABZ_SPEED;
         } else {
             input_pos_ = anticogging_calibration_base_pos_;
             input_vel_ = 0.0f;
@@ -179,12 +188,11 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
  */
 bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate) {
     if (anticogging_velocity_only_) {
-        constexpr float scan_speed = 1.2f;
-        // The uncompensated rotor still has about +/-0.4 turn/s of
-        // position-synchronous ripple at the otherwise stable 2 turn/s scan.
-        // Keep the gate symmetric and bounded, but do not discard exactly the
-        // high-cogging positions that the map needs to observe.
-        constexpr float scan_tolerance = 0.30f;
+        constexpr float scan_speed = FOC_STUDIO_ABZ_SPEED;
+        // The ABZ count-window contains position-synchronous ripple at the
+        // scan speed.  A symmetric gate keeps the map coverage high without
+        // accepting a stalled or runaway interval.
+        constexpr float scan_tolerance = 0.45f;
         constexpr float scan_turns = 6.0f;
         constexpr float torque_scale = 1000000.0f;
 
@@ -642,10 +650,11 @@ bool Controller::update(float* torque_setpoint_output) {
         const bool abz_velocity_mode =
                 config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL &&
                 axis_->encoder_.mode_ == Encoder::MODE_INCREMENTAL;
-        if (abz_velocity_mode) {
-            // Keep the velocity-scan map available for diagnostics, but do not
-            // inject it until the base low-speed loop is stable on hardware.
-            anticogging_scale = 0.0f;
+        if (anticogging_velocity_only_ && abz_velocity_mode) {
+            // The ABZ scan map is valid for the same 2 turn/s velocity loop.
+            // Start below unity to avoid a current step on the first run; the
+            // map itself is bounded to +/-8 mNm during finalisation.
+            anticogging_scale = 0.35f;
         } else if (anticogging_velocity_only_) {
             // A map produced by the ABZ velocity scan is not valid for the
             // other controller modes. In particular, do not change torque

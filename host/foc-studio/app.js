@@ -396,7 +396,7 @@ function ingestLine(line) {
     state.anticoggingIndex = 0;
     dom.calibrationStatus.textContent = 'ABZ 齿槽补偿标定中';
     dom.stepCalibration.textContent = '齿槽标定中 0%';
-    showToast('齿槽标定已开始：+1.2 / -1.2 turn/s，正反各采集 6 圈，预计 20～30 秒');
+    showToast('齿槽标定已开始：+2 / -2 turn/s，正反各采集 6 圈，预计 30～40 秒');
   }
   if (configReadQueue.length && !line.startsWith('ok ')) {
     const input = configReadQueue.shift();
@@ -411,20 +411,20 @@ function makeMockStatus() {
   let coggingTarget = null;
   if (mockCoggingStartedAt !== null) {
     const elapsed = (performance.now() - mockCoggingStartedAt) / 1000;
-    if (elapsed < 2.67) {
-      coggingTarget = 2 * elapsed / 2.67;
+    if (elapsed < 6.67) {
+      coggingTarget = 2 * elapsed / 6.67;
       state.anticoggingIndex = 0;
-    } else if (elapsed < 5.67) {
+    } else if (elapsed < 9.67) {
       coggingTarget = 2;
-      state.anticoggingIndex = Math.round((elapsed - 2.67) / 3 * 1800);
-    } else if (elapsed < 11) {
-      coggingTarget = 2 - 4 * (elapsed - 5.67) / 5.33;
+      state.anticoggingIndex = Math.round((elapsed - 6.67) / 3 * 1800);
+    } else if (elapsed < 23) {
+      coggingTarget = 2 - 4 * (elapsed - 9.67) / 13.33;
       state.anticoggingIndex = 1800;
-    } else if (elapsed < 14) {
+    } else if (elapsed < 26) {
       coggingTarget = -2;
-      state.anticoggingIndex = 1800 + Math.round((elapsed - 11) / 3 * 1800);
-    } else if (elapsed < 16.67) {
-      coggingTarget = -2 + 2 * (elapsed - 14) / 2.67;
+      state.anticoggingIndex = 1800 + Math.round((elapsed - 23) / 3 * 1800);
+    } else if (elapsed < 32.67) {
+      coggingTarget = -2 + 2 * (elapsed - 26) / 6.67;
       state.anticoggingIndex = 3600;
     } else {
       mockCoggingStartedAt = null;
