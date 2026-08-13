@@ -160,6 +160,28 @@ TEST_SUITE("low_speed_compensator") {
                 LowSpeedCompensator::breakaway_torque).epsilon(0.02f));
     }
 
+    TEST_CASE("extended ceiling is confined to the lowest speed") {
+        LowSpeedCompensator low_speed;
+        LowSpeedCompensationResult low_result;
+        for (int i = 0; i < 12000; ++i) {
+            low_result = low_speed.update(
+                    true, 1.0f, 0.5f, 0.0f, 0.5f, 0.0f,
+                    0, 0.000125f);
+        }
+        CHECK(low_result.friction_torque == doctest::Approx(
+                LowSpeedCompensator::breakaway_torque).epsilon(0.02f));
+
+        LowSpeedCompensator nominal_speed;
+        LowSpeedCompensationResult nominal_result;
+        for (int i = 0; i < 12000; ++i) {
+            nominal_result = nominal_speed.update(
+                    true, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f,
+                    0, 0.000125f);
+        }
+        CHECK(nominal_result.friction_torque == doctest::Approx(
+                LowSpeedCompensator::nominal_breakaway_torque).epsilon(0.02f));
+    }
+
     TEST_CASE("isolated count edges still confirm a stall") {
         LowSpeedCompensator compensator;
         LowSpeedCompensationResult result;
@@ -202,7 +224,12 @@ TEST_SUITE("low_speed_compensator") {
                     true, 1.0f, 0.5f, 0.49f, 0.01f, 0.0f,
                     1200 + i / 10, 0.000125f);
         }
-        CHECK(result.friction_torque >= held_torque * 0.90f);
+        // The positive-error assist is allowed to fade as the tracking error
+        // closes, but the bounded hold term must remain available so the
+        // rotor does not fall back into static friction.
+        CHECK(result.friction_torque >=
+                (LowSpeedCompensator::running_torque +
+                 LowSpeedCompensator::speed_hold_limit) * 0.95f);
         CHECK(result.friction_torque <= LowSpeedCompensator::breakaway_torque);
     }
 

@@ -715,12 +715,15 @@ bool Controller::update(float* torque_setpoint_output) {
         }
         velocity_control_feedback_ = velocity_feedback;
         velocity_control_feedback_valid_ = true;
-        // Keep the filtered value for normal acceleration, but use the
-        // instantaneous count-window value when it clearly reports an
-        // overspeed.  This asymmetric path removes low-pass braking delay
-        // without making isolated low-speed count edges drive the P term.
+        // Keep the filtered value throughout the sparse-count region.  A
+        // 15 ms ABZ window can jump by several tenths of a turn/s on one
+        // encoder edge; feeding that single sample to P/compensation makes a
+        // 0.2--1.0 turn/s command look like overspeed and removes the torque
+        // needed to cross the next tooth.  Once the command reaches 2 turn/s
+        // the count stream is dense enough to use the instantaneous sample
+        // for a fast overspeed brake.
         float velocity_error_feedback = velocity_feedback;
-        if (cascaded_abz_mode && std::abs(vel_des) >= 0.02f) {
+        if (cascaded_abz_mode && std::abs(vel_des) >= 2.0f) {
             const float command_sign = vel_des > 0.0f ? 1.0f : -1.0f;
             if (selected_velocity_feedback * command_sign >
                     velocity_feedback * command_sign + 0.02f) {

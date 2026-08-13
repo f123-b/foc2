@@ -46,7 +46,14 @@ public:
     // enters recovery.
     static constexpr float running_torque = 0.0040f;
     static constexpr float soft_breakaway_torque = 0.0085f;
-    static constexpr float breakaway_torque = 0.0140f;
+    // The nominal ceiling is retained at and above 1 turn/s.  Below that
+    // point static friction dominates, so allow a little more bounded torque
+    // to cross a tooth without raising the current limit for the whole speed
+    // range.  The controller multiplies this by its low-speed fade below 2
+    // turn/s, so the additional torque is confined to the actual breakaway
+    // region.
+    static constexpr float breakaway_torque = 0.0180f;
+    static constexpr float nominal_breakaway_torque = 0.0140f;
     static constexpr float torque_rise_rate = 0.0180f;
     static constexpr float torque_fall_rate = 0.60f;
     static constexpr float overspeed_fade_band = 0.12f;
@@ -195,7 +202,10 @@ public:
                     error_assist_gain * positive_error);
             target_magnitude += speed_hold_torque_;
         }
-        target_magnitude = std::min(target_magnitude, breakaway_torque);
+        const float low_speed_ceiling = nominal_breakaway_torque +
+                std::clamp((1.0f - direction_command) / 0.5f, 0.0f, 1.0f) *
+                (breakaway_torque - nominal_breakaway_torque);
+        target_magnitude = std::min(target_magnitude, low_speed_ceiling);
 
         // Remove feed-forward continuously once the rotor passes the command.
         const float overspeed = std::max(
