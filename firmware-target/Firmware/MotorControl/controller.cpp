@@ -608,9 +608,9 @@ bool Controller::update(float* torque_setpoint_output) {
 
     // ABZ at low mechanical speed has sparse count updates. A large integral
     // term then accumulates while the rotor is held by static friction and is
-    // released as one burst when a tooth is crossed. Use a stronger, bounded
-    // proportional term through the 1.5 turn/s region and taper to the
-    // normal speed gains only at 2 turn/s.
+    // released as one burst when a tooth is crossed. Static-friction
+    // breakaway is supplied by the bounded helper below, so keep the P term
+    // quiet in the low-speed region to avoid stick-slip.
     // This branch is deliberately limited to cascaded incremental-encoder
     // control; torque control and SPI/sensorless paths are unchanged.
     const bool cascaded_abz_mode =
@@ -621,8 +621,8 @@ bool Controller::update(float* torque_setpoint_output) {
         const float command_speed = std::abs(vel_des);
         const float high_speed_blend = std::clamp(
                 (command_speed - 1.00f) / 0.75f, 0.0f, 1.0f);
-        constexpr float low_speed_vel_gain = 0.0038f;
-        constexpr float low_speed_integrator_gain = 0.0015f;
+        constexpr float low_speed_vel_gain = 0.0022f;
+        constexpr float low_speed_integrator_gain = 0.0010f;
         vel_gain = low_speed_vel_gain + high_speed_blend *
                 (vel_gain - low_speed_vel_gain);
         vel_integrator_gain = low_speed_integrator_gain + high_speed_blend *
@@ -722,11 +722,11 @@ bool Controller::update(float* torque_setpoint_output) {
         torque += proportional_torque;
 
         if (cascaded_abz_mode) {
-            // Use the helper through the static-friction range, then remove
-            // it before the 1.5 turn/s transition so it cannot excite the
-            // stick-slip oscillation seen below the normal 2 turn/s point.
+            // Use the helper only through the static-friction range. It is
+            // full-strength up to 1 turn/s and fades out by 1.5 turn/s;
+            // above that point the normal velocity loop owns the torque.
             const float low_speed_scale = std::clamp(
-                    (1.75f - std::abs(vel_des)) / 0.75f, 0.0f, 1.0f);
+                    (1.50f - std::abs(vel_des)) / 0.50f, 0.0f, 1.0f);
             if (low_speed_scale > 0.0f) {
                 const bool abz_position_mode =
                         config_.control_mode == CONTROL_MODE_POSITION_CONTROL;
@@ -762,12 +762,16 @@ bool Controller::update(float* torque_setpoint_output) {
                             LowSpeedCompensator::position_velocity_floor,
                             compensation_direction);
                 }
+                // Use the conditioned feedback for torque fade and error
+                // gating.  Feeding the raw count-window impulses here makes
+                // a single edge look like overspeed and removes the very
+                // torque needed to keep a 0.2--0.5 turn/s command moving.
                 const float compensation_error =
-                        compensation_command - selected_velocity_feedback;
+                        compensation_command - velocity_feedback;
                 const LowSpeedCompensationResult compensation =
                         low_speed_compensator_.update(
                                 compensation_active, compensation_direction,
-                                compensation_command, selected_velocity_feedback,
+                                compensation_command, velocity_feedback,
                                 compensation_error, vel_integrator_torque_,
                                 axis_->encoder_.shadow_count_,
                                 current_meas_period);

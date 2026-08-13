@@ -27,16 +27,21 @@ public:
     static constexpr float position_velocity_floor = 0.02f;
     static constexpr float integrator_hold_delay = 0.008f;
     static constexpr float stall_confirm_time = 0.060f;
-    static constexpr float soft_breakaway_ramp_time = 0.16f;
-    static constexpr float hard_breakaway_ramp_time = 0.30f;
+    // Ramp through static friction without a hard torque step.  The larger
+    // final value is needed to start this motor below 1 turn/s.
+    static constexpr float soft_breakaway_ramp_time = 0.12f;
+    static constexpr float hard_breakaway_ramp_time = 0.24f;
     static constexpr float recovery_min_time = 0.025f;
     static constexpr int32_t recovery_progress_counts = 3;
     // Use a bounded, slew-limited breakaway ramp rather than a torque step;
     // the velocity loop supplies the remaining acceleration torque.
-    static constexpr float running_torque = 0.0008f;
-    static constexpr float soft_breakaway_torque = 0.0035f;
-    static constexpr float breakaway_torque = 0.0060f;
-    static constexpr float torque_rise_rate = 0.0120f;
+    // Keep enough torque after breakaway to stay above static friction at
+    // 0.2--1.0 turn/s; otherwise the rotor stops again as soon as the ramp
+    // enters recovery.
+    static constexpr float running_torque = 0.0025f;
+    static constexpr float soft_breakaway_torque = 0.0060f;
+    static constexpr float breakaway_torque = 0.0100f;
+    static constexpr float torque_rise_rate = 0.0180f;
     static constexpr float torque_fall_rate = 0.60f;
     static constexpr float overspeed_fade_band = 0.12f;
 
@@ -76,15 +81,24 @@ public:
             clear();
             return result;
         }
-        if (direction_ != 0.0f && direction != direction_)
+        const bool direction_changed = direction_ != 0.0f && direction != direction_;
+        if (direction_changed)
             clear();
         direction_ = direction;
+        // Do not carry the previous direction's compensation through a
+        // reversal.  The next control tick starts from the new running torque.
+        if (direction_changed)
+            return result;
 
         bool forward_progress = false;
         if (encoder_count_initialized_) {
             const int64_t delta = static_cast<int64_t>(encoder_count) -
                     static_cast<int64_t>(progress_count_);
-            if (static_cast<float>(delta) * direction > 0.0f) {
+            // Ignore isolated ABZ edges while the rotor is stuck.  They are
+            // commonly contact bounce/electrical dither and must not reset
+            // the stall timer before the breakaway ramp can build torque.
+            if (static_cast<float>(delta) * direction >=
+                    static_cast<float>(recovery_progress_counts)) {
                 progress_count_ = encoder_count;
                 forward_progress = true;
             }

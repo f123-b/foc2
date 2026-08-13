@@ -160,6 +160,22 @@ TEST_SUITE("low_speed_compensator") {
                 LowSpeedCompensator::breakaway_torque).epsilon(0.02f));
     }
 
+    TEST_CASE("isolated count edges still confirm a stall") {
+        LowSpeedCompensator compensator;
+        LowSpeedCompensationResult result;
+        int32_t count = 0;
+        for (int i = 0; i < 12000; ++i) {
+            // Simulate a one-count ABZ bounce that returns to the same
+            // position. It must not keep the stall timer alive forever.
+            count = (i / 10) & 1;
+            result = compensator.update(
+                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
+                    count, 0.000125f);
+        }
+        CHECK(result.state == LowSpeedCompensator::STATE_BREAKAWAY);
+        CHECK(result.hold_integrator);
+    }
+
     TEST_CASE("count dither cannot release breakaway torque") {
         LowSpeedCompensator compensator;
         for (int i = 0; i < 12000; ++i) {
