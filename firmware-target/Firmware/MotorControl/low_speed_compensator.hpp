@@ -44,6 +44,8 @@ public:
     static constexpr float torque_rise_rate = 0.0180f;
     static constexpr float torque_fall_rate = 0.60f;
     static constexpr float overspeed_fade_band = 0.12f;
+    static constexpr float error_assist_gain = 0.020f;
+    static constexpr float overspeed_confirm_time = 0.003f;
 
     void clear() {
         state_ = STATE_IDLE;
@@ -55,6 +57,7 @@ public:
         encoder_count_initialized_ = false;
         progress_count_ = 0;
         breakaway_start_count_ = 0;
+        overspeed_time_ = 0.0f;
     }
 
     LowSpeedCompensationResult update(bool active,
@@ -147,13 +150,32 @@ public:
             recovery_time_ += period;
         }
 
+        // A few encoder counts can be real motion that is still below the
+        // requested speed.  Keep building torque from the positive velocity
+        // error instead of treating those counts as proof that breakaway is
+        // complete.  The assist is bounded by the same breakaway ceiling.
+        if (state_ == STATE_RUNNING) {
+            const float forward_error = std::max(0.0f, velocity_error * direction);
+            target_magnitude += std::min(
+                    breakaway_torque - running_torque,
+                    error_assist_gain * forward_error);
+        }
+
         // Remove feed-forward continuously once the rotor passes the command.
         const float direction_command = std::abs(command_velocity);
         const float forward_velocity = measured_velocity * direction;
         const float overspeed = std::max(
                 0.0f, forward_velocity - direction_command);
+        if (overspeed > overspeed_fade_band) {
+            overspeed_time_ = std::min(
+                    overspeed_time_ + period, overspeed_confirm_time);
+        } else {
+            overspeed_time_ = std::max(0.0f, overspeed_time_ - 4.0f * period);
+        }
+        const float confirmed_overspeed = overspeed_time_ >=
+                overspeed_confirm_time ? overspeed : 0.0f;
         const float overspeed_ratio = std::clamp(
-                overspeed / overspeed_fade_band, 0.0f, 1.0f);
+                confirmed_overspeed / overspeed_fade_band, 0.0f, 1.0f);
         const float smooth_ratio = overspeed_ratio * overspeed_ratio *
                 (3.0f - 2.0f * overspeed_ratio);
         target_magnitude *= 1.0f - smooth_ratio;
@@ -198,6 +220,7 @@ private:
     bool encoder_count_initialized_ = false;
     int32_t progress_count_ = 0;
     int32_t breakaway_start_count_ = 0;
+    float overspeed_time_ = 0.0f;
 };
 
 #endif // __LOW_SPEED_COMPENSATOR_HPP

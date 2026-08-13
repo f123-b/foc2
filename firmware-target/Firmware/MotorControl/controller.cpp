@@ -715,7 +715,19 @@ bool Controller::update(float* torque_setpoint_output) {
         }
         velocity_control_feedback_ = velocity_feedback;
         velocity_control_feedback_valid_ = true;
-        v_err = vel_des - velocity_feedback;
+        // Keep the filtered value for normal acceleration, but use the
+        // instantaneous count-window value when it clearly reports an
+        // overspeed.  This asymmetric path removes low-pass braking delay
+        // without making isolated low-speed count edges drive the P term.
+        float velocity_error_feedback = velocity_feedback;
+        if (cascaded_abz_mode && std::abs(vel_des) >= 0.02f) {
+            const float command_sign = vel_des > 0.0f ? 1.0f : -1.0f;
+            if (selected_velocity_feedback * command_sign >
+                    velocity_feedback * command_sign + 0.02f) {
+                velocity_error_feedback = selected_velocity_feedback;
+            }
+        }
+        v_err = vel_des - velocity_error_feedback;
         integral_v_err = v_err;
         const float proportional_torque =
                 (vel_gain * gain_scheduling_multiplier) * v_err;
@@ -767,11 +779,11 @@ bool Controller::update(float* torque_setpoint_output) {
                 // a single edge look like overspeed and removes the very
                 // torque needed to keep a 0.2--0.5 turn/s command moving.
                 const float compensation_error =
-                        compensation_command - velocity_feedback;
+                        compensation_command - velocity_error_feedback;
                 const LowSpeedCompensationResult compensation =
                         low_speed_compensator_.update(
                                 compensation_active, compensation_direction,
-                                compensation_command, velocity_feedback,
+                                compensation_command, velocity_error_feedback,
                                 compensation_error, vel_integrator_torque_,
                                 axis_->encoder_.shadow_count_,
                                 current_meas_period);

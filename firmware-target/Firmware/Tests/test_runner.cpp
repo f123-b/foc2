@@ -176,6 +176,18 @@ TEST_SUITE("low_speed_compensator") {
         CHECK(result.hold_integrator);
     }
 
+    TEST_CASE("low speed error assist builds torque before stall") {
+        LowSpeedCompensator compensator;
+        LowSpeedCompensationResult result;
+        for (int i = 0; i < 2000; ++i) {
+            result = compensator.update(
+                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
+                    i / 10, 0.000125f);
+        }
+        CHECK(result.state == LowSpeedCompensator::STATE_RUNNING);
+        CHECK(result.friction_torque > LowSpeedCompensator::running_torque);
+    }
+
     TEST_CASE("count dither cannot release breakaway torque") {
         LowSpeedCompensator compensator;
         for (int i = 0; i < 12000; ++i) {
