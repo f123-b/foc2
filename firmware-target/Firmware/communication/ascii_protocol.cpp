@@ -93,6 +93,11 @@ struct FocTorqueSafetyState {
 static FocPositionLimitState foc_position_limits[AXIS_COUNT] = {};
 static FocTorqueSafetyState foc_torque_safety[AXIS_COUNT] = {};
 
+// Torque mode is open-loop with respect to speed. Keep its existing torque
+// command path, but apply a conservative velocity boundary so a sustained
+// torque command cannot run the motor into an overspeed/current fault.
+static constexpr float FOC_TORQUE_MODE_VEL_LIMIT = 2.0f;
+
 static uint8_t get_foc_feedback_mode(unsigned axis_num) {
     if (foc_feedback_modes[axis_num] == 0xff) {
         foc_feedback_modes[axis_num] = (axes[axis_num]->encoder_.config_.mode == Encoder::MODE_SPI_ABS_AMS)
@@ -166,10 +171,12 @@ static void apply_foc_torque_safety(Axis* axis) {
         safety.enable_overspeed_error = axis->controller_.config_.enable_overspeed_error;
         safety.active = true;
     }
-    // Torque mode must preserve the requested torque instead of silently
-    // clamping it against a software velocity target. The independent
-    // overspeed fault, motor current limit and thermal protection remain on.
-    axis->controller_.config_.enable_current_mode_vel_limit = false;
+    // Preserve the torque command path, while bounding the speed at the
+    // proven low-speed operating limit. The configured limit remains the
+    // tighter bound when it is already lower than this safety ceiling.
+    axis->controller_.config_.vel_limit = std::min(
+            std::abs(axis->controller_.config_.vel_limit), FOC_TORQUE_MODE_VEL_LIMIT);
+    axis->controller_.config_.enable_current_mode_vel_limit = true;
     axis->controller_.config_.enable_overspeed_error = true;
 }
 
