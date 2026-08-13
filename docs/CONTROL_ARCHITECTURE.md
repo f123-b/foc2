@@ -42,9 +42,9 @@ The command, not measured speed, selects the 2.50–4.00 turn/s blend. That prev
 | 15 ms rolling window | Avoid PLL zero-speed deadband and update every control tick. | Quantized at 4000 CPR: one count per 15 ms equals 0.0167 turn/s; moving window adds roughly half-window observation delay and correlated steps. |
 | Command-speed blend | Avoid estimator source toggling. | Window feedback remains dominant below 2.5 turn/s and blends to PLL by 4 turn/s; command-based selection avoids estimator chatter. |
 | 6–12 Hz one-pole LPF | Prevent P/I chasing edge impulses. | A first-order lag has material phase delay near its bandwidth, compounded with window delay; bandwidth changes continuously in value but has slope break at 1/2 turn/s. |
-| Gain schedule | Raises low-speed P while lowering I. | Continuous at 1.25/2.00 in value, but effective gains differ from host-visible configured values. |
-| I clamp | Limits stored energy to 0.0025–0.005 Nm. | Bounds windup and prevents a tooth-crossing release from becoming a speed impulse. |
-| LowSpeedCompensator | Supplies a 0.0012–0.012 Nm feed-forward/breakaway ramp while holding worsening I. | It remains available through 1.5 turn/s and fades before 2 turn/s; the final threshold still needs HIL confirmation. |
+| Gain schedule | Raises low-speed P while lowering I. | Continuous at 1.00/1.75 in value, but effective gains differ from host-visible configured values. |
+| I clamp | Limits stored energy to 0–0.0045 Nm, blended in from 1.0 to 1.75 turn/s. | Bounds windup and prevents a tooth-crossing release from becoming a speed impulse. |
+| LowSpeedCompensator | Supplies a 0.0008–0.006 Nm feed-forward/breakaway ramp while holding worsening I. | It is full below 1.0 turn/s, fades to zero by 1.75 turn/s, and is not stacked on the normal 2 turn/s loop. |
 
 The present code has no abrupt value step in these linear blends, but it does have several slope and state transitions. A boundary test must measure final torque, not only individual gains.
 

@@ -25,20 +25,20 @@ public:
 
     static constexpr float command_threshold = 0.02f;
     static constexpr float position_velocity_floor = 0.02f;
-    static constexpr float integrator_hold_delay = 0.012f;
-    static constexpr float stall_confirm_time = 0.08f;
-    static constexpr float soft_breakaway_ramp_time = 0.20f;
-    static constexpr float hard_breakaway_ramp_time = 0.40f;
-    static constexpr float recovery_min_time = 0.04f;
+    static constexpr float integrator_hold_delay = 0.008f;
+    static constexpr float stall_confirm_time = 0.060f;
+    static constexpr float soft_breakaway_ramp_time = 0.16f;
+    static constexpr float hard_breakaway_ramp_time = 0.30f;
+    static constexpr float recovery_min_time = 0.025f;
     static constexpr int32_t recovery_progress_counts = 3;
     // Use a bounded, slew-limited breakaway ramp rather than a torque step;
     // the velocity loop supplies the remaining acceleration torque.
-    static constexpr float running_torque = 0.0012f;
-    static constexpr float soft_breakaway_torque = 0.0060f;
-    static constexpr float breakaway_torque = 0.0120f;
-    static constexpr float torque_rise_rate = 0.0180f;
-    static constexpr float torque_fall_rate = 0.2500f;
-    static constexpr float overspeed_fade_band = 0.08f;
+    static constexpr float running_torque = 0.0008f;
+    static constexpr float soft_breakaway_torque = 0.0035f;
+    static constexpr float breakaway_torque = 0.0060f;
+    static constexpr float torque_rise_rate = 0.0120f;
+    static constexpr float torque_fall_rate = 0.60f;
+    static constexpr float overspeed_fade_band = 0.12f;
 
     void clear() {
         state_ = STATE_IDLE;
