@@ -109,6 +109,7 @@ let lastFrameAt = 0;
 let configReadQueue = [];
 let polling = false;
 let nextSlowPollAt = 0;
+let nextWatchdogAt = 0;
 let statusVersion = 0;
 const scopeChannels = [...document.querySelectorAll('[data-scope-key]')];
 const scopeValueOutputs = [...document.querySelectorAll('[data-scope-value]')];
@@ -590,6 +591,7 @@ async function connectSerial() {
     showToast('USB CDC 已连接');
     await sendCommand(command.telemetry());
     nextSlowPollAt = performance.now() + 200;
+    nextWatchdogAt = performance.now();
   } catch (error) {
     showToast(`USB 连接失败：${error.message}`);
     await disconnectSerial(false);
@@ -1416,7 +1418,10 @@ window.setInterval(() => {
   if (state.transport !== 'connected' || polling) return;
   polling = true;
   const now = performance.now();
-  sendCommand(command.fastTelemetry(), { log: false })
+  const watchdog = now >= nextWatchdogAt
+    ? sendCommand(command.watchdog(), { log: false }).then(() => { nextWatchdogAt = now + 250; })
+    : Promise.resolve();
+  watchdog.then(() => sendCommand(command.fastTelemetry(), { log: false }))
     .then(() => {
       if (now < nextSlowPollAt) return undefined;
       nextSlowPollAt = now + 200;
