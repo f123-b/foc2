@@ -267,6 +267,12 @@ function faultSignature(status) {
     status.sensorlessError, status.fetThermistorError, status.motorThermistorError].join(':');
 }
 
+function hasFault(status = state) {
+  return [status.fault, status.motorError, status.encoderError, status.controllerError,
+    status.sensorlessError, status.fetThermistorError, status.motorThermistorError]
+    .some((value) => Number(value) !== 0);
+}
+
 function currentFaultText(status = state) {
   const details = decodeFaults(status);
   if (!details.length) return '无故障';
@@ -274,12 +280,12 @@ function currentFaultText(status = state) {
 }
 
 function recordFault(status) {
-  if (!status.fault || faultSignature(status) === faultSignature(state)) return;
+  if (!hasFault(status) || faultSignature(status) === faultSignature(state)) return;
   const details = decodeFaults(status);
   state.faultHistory.unshift({
     time: new Date().toLocaleTimeString(),
     axisState: status.axisState,
-    fault: status.fault,
+    fault: status.fault || status.motorError || status.encoderError || status.controllerError || status.sensorlessError,
     velocity: status.velocity,
     current: status.current,
     summary: details.map(({ title }) => title).join('；') || '未知故障',
@@ -308,10 +314,16 @@ function setFastAxisStatus(status) {
 }
 
 function renderStatus() {
-  const faultLabel = state.fault ? `${faultSummary(state)} · 0x${state.fault.toString(16).padStart(8, '0')}` : '无故障';
+  const faultCodes = [
+    ['轴', state.fault], ['电机', state.motorError], ['编码器', state.encoderError],
+    ['控制器', state.controllerError], ['无感', state.sensorlessError],
+  ].filter(([, value]) => Number(value) !== 0)
+    .map(([label, value]) => `${label} 0x${(Number(value) >>> 0).toString(16).padStart(8, '0')}`)
+    .join(' · ');
+  const faultLabel = hasFault(state) ? `${faultSummary(state)} · ${faultCodes}` : '无故障';
   dom.stateValue.textContent = state.axisState;
   dom.faultValue.textContent = faultLabel;
-  dom.faultValue.style.color = state.fault ? 'var(--red)' : 'var(--green)';
+  dom.faultValue.style.color = hasFault(state) ? 'var(--red)' : 'var(--green)';
   dom.velocityValue.textContent = state.velocity.toFixed(1);
   dom.rpmValue.textContent = `${Math.round(state.velocity * 60)} RPM`;
   dom.busVoltageValue.textContent = state.busVoltage.toFixed(1);
@@ -620,9 +632,9 @@ function waitForState(targetState, timeoutMs = 1800) {
   return new Promise((resolve) => {
     const started = performance.now();
     const timer = window.setInterval(() => {
-      if (statusVersion > initialVersion && (state.stateCode === targetState || state.fault)) {
+      if (statusVersion > initialVersion && (state.stateCode === targetState || hasFault(state))) {
         window.clearInterval(timer);
-        resolve(state.stateCode === targetState && !state.fault);
+        resolve(state.stateCode === targetState && !hasFault(state));
       } else if (performance.now() - started >= timeoutMs) {
         window.clearInterval(timer);
         resolve(false);
@@ -634,7 +646,7 @@ function waitForState(targetState, timeoutMs = 1800) {
 function controlPreflight(kind) {
   if (state.transport === 'disconnected') return '请先连接 USB 或启动模拟设备';
   if (kind === 'position' && isSensorless()) return '无感模式不支持位置控制';
-  if (state.fault) return `${faultSummary(state)}。请先处理并清除故障`;
+  if (hasFault(state)) return `${faultSummary(state)}。请先处理并清除故障`;
   if (!state.motorCalibrated) return '电机尚未校准，请先执行校准向导';
   if (state.direction === 0) return '电机方向尚未确定。编码器模式请执行完整校准；无感模式请在参数配置中设置方向为 1 或 -1';
   if (!isSensorless() && !state.encoderReady) return '编码器尚未就绪，请检查接线并完成编码器校准';
@@ -657,6 +669,7 @@ function zeroControlCommand(kind) {
 }
 
 function validateControlTarget(kind, rawValue) {
+  if (String(rawValue ?? '').trim() === '') return '请输入目标值';
   const value = Number(rawValue);
   if (!Number.isFinite(value)) return '目标值必须是有效数字';
   if (kind === 'velocity' && isSensorless() && (Math.abs(value) < 5 || Math.abs(value) > 10)) {
@@ -684,7 +697,7 @@ async function sendControl(text, kind, rawValue) {
     await sendCommand(command.state(targetState));
     const active = await waitForState(targetState);
     if (!active) {
-      showToast(state.fault ? currentFaultText(state) : `未能进入${AXIS_STATE[targetState]}，请检查校准和反馈状态`);
+      showToast(hasFault(state) ? currentFaultText(state) : `未能进入${AXIS_STATE[targetState]}，请检查校准和反馈状态`);
       return;
     }
   }
@@ -792,7 +805,7 @@ function updateCalibrationState() {
   const readiness = `电机校准：${state.motorCalibrated ? '完成' : '未完成'} · 编码器：${state.encoderReady ? '就绪' : '未就绪'} · 方向：${state.direction || '未确定'}`;
   const coverage = Math.min(3600, Math.max(0, state.anticoggingCoverage || 0));
   const cogging = `齿槽补偿：${coggingActive ? `${coggingPercent.toFixed(1)}%` : state.anticoggingValid ? `本次上电已就绪 · 有效覆盖 ${coverage}/3600` : `未标定 · 有效覆盖 ${coverage}/3600`}`;
-  dom.calibrationOutput.textContent = `${new Date().toLocaleTimeString()}  状态：${state.axisState}\n反馈：${modeLabel(state.mode)}\n${readiness}\n${cogging}\n${state.fault ? currentFaultText(state) : '无故障'}`;
+  dom.calibrationOutput.textContent = `${new Date().toLocaleTimeString()}  状态：${state.axisState}\n反馈：${modeLabel(state.mode)}\n${readiness}\n${cogging}\n${hasFault(state) ? currentFaultText(state) : '无故障'}`;
   dom.coggingCalibrationButton.disabled = state.transport === 'disconnected' ||
     state.mode !== MODE.ABZ || state.stateCode !== 1 || !state.motorCalibrated ||
     !state.encoderReady || coggingActive;
@@ -876,15 +889,20 @@ function scopeKeysWithSetpoints(keys) {
 function sharedAutoRange(keys, samples) {
   const rangeKeys = scopeKeysWithSetpoints(keys);
   if (!keys.length || !samples.length) return { ...scopeSharedRange };
-  let min = Infinity;
-  let max = -Infinity;
+  const values = [];
   rangeKeys.forEach((key) => samples.forEach((sample) => {
     const value = Number(sample[key]);
     if (!Number.isFinite(value)) return;
-    min = Math.min(min, value);
-    max = Math.max(max, value);
+    values.push(value);
   }));
-  if (!Number.isFinite(min) || !Number.isFinite(max)) return { ...scopeSharedRange };
+  if (!values.length) return { ...scopeSharedRange };
+  values.sort((a, b) => a - b);
+  // Ignore isolated ADC/serial spikes when choosing the display range. The
+  // samples remain intact and can still be inspected with the cursor.
+  const low = values[Math.floor((values.length - 1) * 0.02)];
+  const high = values[Math.ceil((values.length - 1) * 0.98)];
+  const min = Math.min(low, high);
+  const max = Math.max(low, high);
   const floor = Math.max(...rangeKeys.map((key) => chartSeries[key]?.floor ?? 0.1));
   const center = (min + max) / 2;
   const span = Math.max(max - min, floor * 2);
