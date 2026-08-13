@@ -44,7 +44,7 @@ The command, not measured speed, selects the 2.50–4.00 turn/s blend. That prev
 | 6–12 Hz one-pole LPF | Prevent P/I chasing edge impulses. | A first-order lag has material phase delay near its bandwidth, compounded with window delay; bandwidth changes continuously in value but has slope break at 1/2 turn/s. |
 | Gain schedule | Lowers low-speed P/I so breakaway torque is supplied by one bounded source. | Continuous at 1.00/1.75 in value, but effective gains differ from host-visible configured values. |
 | I clamp | Limits stored energy to 0–0.0045 Nm, blended in from 1.0 to 1.75 turn/s. | Bounds windup and prevents a tooth-crossing release from becoming a speed impulse. |
-| LowSpeedCompensator | Supplies a 0.0025–0.010 Nm feed-forward/breakaway ramp, adds bounded positive-speed-error assist, and holds worsening I. | It is full below 1.0 turn/s, fades to zero by 1.5 turn/s, and is not stacked on the normal 2 turn/s loop. Isolated encoder edges do not reset the stall timer. |
+| LowSpeedCompensator | Supplies a 0.0025–0.012 Nm feed-forward/breakaway ramp, adds bounded positive-speed-error assist, and holds worsening I. | It is full below 1.0 turn/s, fades to zero by 1.5 turn/s, and is not stacked on the normal 2 turn/s loop. Recovery requires both forward encoder progress and 12 ms at ≥55% of the commanded speed, so low-speed count dither cannot unload the torque prematurely. |
 
 The present code has no abrupt value step in these linear blends, but it does have several slope and state transitions. A boundary test must measure final torque, not only individual gains.
 

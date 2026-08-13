@@ -33,14 +33,20 @@ public:
     static constexpr float hard_breakaway_ramp_time = 0.24f;
     static constexpr float recovery_min_time = 0.025f;
     static constexpr int32_t recovery_progress_counts = 3;
+    // Encoder edges alone are not enough to declare breakaway complete:
+    // low-speed ABZ feedback can advance a few counts while the rotor is
+    // still below the commanded velocity.  Require a short dwell at a
+    // meaningful fraction of the command before unloading the assist.
+    static constexpr float recovery_speed_ratio = 0.55f;
+    static constexpr float recovery_speed_confirm_time = 0.012f;
     // Use a bounded, slew-limited breakaway ramp rather than a torque step;
     // the velocity loop supplies the remaining acceleration torque.
     // Keep enough torque after breakaway to stay above static friction at
     // 0.2--1.0 turn/s; otherwise the rotor stops again as soon as the ramp
     // enters recovery.
     static constexpr float running_torque = 0.0025f;
-    static constexpr float soft_breakaway_torque = 0.0060f;
-    static constexpr float breakaway_torque = 0.0100f;
+    static constexpr float soft_breakaway_torque = 0.0070f;
+    static constexpr float breakaway_torque = 0.0120f;
     static constexpr float torque_rise_rate = 0.0180f;
     static constexpr float torque_fall_rate = 0.60f;
     static constexpr float overspeed_fade_band = 0.12f;
@@ -57,6 +63,7 @@ public:
         encoder_count_initialized_ = false;
         progress_count_ = 0;
         breakaway_start_count_ = 0;
+        recovery_ready_time_ = 0.0f;
         overspeed_time_ = 0.0f;
     }
 
@@ -118,13 +125,25 @@ public:
 
         if (state_ == STATE_IDLE)
             state_ = STATE_RUNNING;
+        const float direction_command = std::abs(command_velocity);
+        const float forward_velocity = measured_velocity * direction;
+        const bool recovery_speed_ready = direction_command <= command_threshold ||
+                forward_velocity >= recovery_speed_ratio * direction_command;
         if (state_ == STATE_BREAKAWAY) {
             breakaway_time_ += period;
             const int64_t breakaway_progress =
                     static_cast<int64_t>(progress_count_) -
                     static_cast<int64_t>(breakaway_start_count_);
             if (static_cast<float>(breakaway_progress) * direction >=
-                    static_cast<float>(recovery_progress_counts)) {
+                    static_cast<float>(recovery_progress_counts) &&
+                    recovery_speed_ready) {
+                recovery_ready_time_ = std::min(
+                        recovery_ready_time_ + period,
+                        recovery_speed_confirm_time);
+            } else {
+                recovery_ready_time_ = 0.0f;
+            }
+            if (recovery_ready_time_ >= recovery_speed_confirm_time) {
                 state_ = STATE_RECOVERING;
                 recovery_time_ = 0.0f;
             }
@@ -154,7 +173,7 @@ public:
         // requested speed.  Keep building torque from the positive velocity
         // error instead of treating those counts as proof that breakaway is
         // complete.  The assist is bounded by the same breakaway ceiling.
-        if (state_ == STATE_RUNNING) {
+        if (state_ == STATE_RUNNING || state_ == STATE_RECOVERING) {
             const float forward_error = std::max(0.0f, velocity_error * direction);
             target_magnitude += std::min(
                     breakaway_torque - running_torque,
@@ -162,8 +181,6 @@ public:
         }
 
         // Remove feed-forward continuously once the rotor passes the command.
-        const float direction_command = std::abs(command_velocity);
-        const float forward_velocity = measured_velocity * direction;
         const float overspeed = std::max(
                 0.0f, forward_velocity - direction_command);
         if (overspeed > overspeed_fade_band) {
@@ -220,6 +237,7 @@ private:
     bool encoder_count_initialized_ = false;
     int32_t progress_count_ = 0;
     int32_t breakaway_start_count_ = 0;
+    float recovery_ready_time_ = 0.0f;
     float overspeed_time_ = 0.0f;
 };
 

@@ -219,11 +219,20 @@ TEST_SUITE("low_speed_compensator") {
         for (int32_t count = 1; count <=
                 LowSpeedCompensator::recovery_progress_counts; ++count) {
             result = compensator.update(
-                    true, 1.0f, 0.2f, 0.1f, 0.1f, 0.0f,
+                    true, 1.0f, 0.2f, 0.2f, 0.0f, 0.0f,
                     count, 0.000125f);
         }
+        // The count threshold is necessary but not sufficient; keep the
+        // assist engaged until the measured speed has been confirmed.
+        CHECK(result.state == LowSpeedCompensator::STATE_BREAKAWAY);
+        for (int i = 0; i < 120; ++i) {
+            result = compensator.update(
+                    true, 1.0f, 0.2f, 0.2f, 0.0f, 0.0f,
+                    LowSpeedCompensator::recovery_progress_counts,
+                    0.000125f);
+        }
         CHECK(result.state == LowSpeedCompensator::STATE_RECOVERING);
-        CHECK(result.hold_integrator);
+        CHECK_FALSE(result.hold_integrator);
         for (int i = 0; i < 600; ++i) {
             result = compensator.update(
                     true, 1.0f, 0.2f, 0.2f, 0.0f, 0.0f,
