@@ -652,9 +652,15 @@ bool Controller::update(float* torque_setpoint_output) {
                 axis_->encoder_.mode_ == Encoder::MODE_INCREMENTAL;
         if (anticogging_velocity_only_ && abz_velocity_mode) {
             // The ABZ scan map is valid for the same 2 turn/s velocity loop.
+            // Do not apply a 2 turn/s map at standstill or during a slow
+            // breakaway.  Blend it in only after the low-speed compensator has
+            // crossed its unstable sparse-count region.
+            const float command_speed = std::abs(vel_des);
+            const float speed_blend = std::clamp(
+                    (command_speed - 0.75f) / 0.75f, 0.0f, 1.0f);
             // Start below unity to avoid a current step on the first run; the
             // map itself is bounded to +/-8 mNm during finalisation.
-            anticogging_scale = 0.35f;
+            anticogging_scale = 0.35f * speed_blend;
         } else if (anticogging_velocity_only_) {
             // A map produced by the ABZ velocity scan is not valid for the
             // other controller modes. In particular, do not change torque
@@ -715,8 +721,12 @@ bool Controller::update(float* torque_setpoint_output) {
         torque += proportional_torque;
 
         if (cascaded_abz_mode) {
-            const float low_speed_scale = 1.0f - std::clamp(
-                    (std::abs(vel_des) - 1.0f) / 0.5f, 0.0f, 1.0f);
+            // The breakaway helper is only for the sparse-count region.  It
+            // must be completely out of the loop before the normal 1 turn/s
+            // operating point, otherwise its friction kick is added on top of
+            // the regular velocity controller.
+            const float low_speed_scale = std::clamp(
+                    (0.75f - std::abs(vel_des)) / 0.70f, 0.0f, 1.0f);
             if (low_speed_scale > 0.0f) {
                 const bool abz_position_mode =
                         config_.control_mode == CONTROL_MODE_POSITION_CONTROL;
@@ -825,8 +835,8 @@ bool Controller::update(float* torque_setpoint_output) {
             // stored two orders of magnitude more energy than the low-speed
             // loop and produced the measured 1-2 turn/s oscillation.
             const float release = std::clamp(
-                    (std::abs(vel_des) - 0.50f) / 1.50f, 0.0f, 1.0f);
-            const float integral_limit = 0.003f + release * 0.005f;
+                    (std::abs(vel_des) - 0.25f) / 1.75f, 0.0f, 1.0f);
+            const float integral_limit = 0.0015f + release * 0.0035f;
             vel_integrator_torque_ = std::clamp(
                     vel_integrator_torque_, -integral_limit, integral_limit);
         }

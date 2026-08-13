@@ -119,6 +119,8 @@ public:
         TIM_1_8_PERIOD_CLOCKS / 2
     };
     bool next_timings_valid_ = false;
+    // ISR-side one-cycle jitter budget. Consecutive misses still disarm PWM.
+    volatile uint8_t control_deadline_miss_count_ = 0;
     uint16_t last_cpu_time_ = 0;
     int timing_log_index_ = 0;
     struct {

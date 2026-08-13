@@ -43,8 +43,8 @@ The command, not measured speed, selects the 1.50–1.75 turn/s blend. That prev
 | Command-speed blend | Avoid estimator source toggling. | Linear value continuity but derivative discontinuity at 1.50/1.75; no hysteresis or acceleration-aware policy. |
 | 8–15 Hz one-pole LPF | Prevent P/I chasing edge impulses. | A first-order lag has material phase delay near its bandwidth, compounded with window delay; bandwidth changes continuously in value but has slope break at 1/2 turn/s. |
 | Gain schedule | Raises low-speed P while lowering I. | Continuous at 0.75/1.50 in value, but effective gains differ from host-visible configured values. |
-| I clamp | Limits stored energy to 0.003–0.008 Nm. | Bounds windup but release slope changes at 0.50 and 2.00 turn/s. |
-| LowSpeedCompensator | Supplies feed-forward/breakaway torque while holding worsening I. | It overlaps with P and I as a motion-producing mechanism; breakaway/recovery state thresholds need HIL proof. |
+| I clamp | Limits stored energy to 0.0015–0.005 Nm. | Bounds windup and prevents a tooth-crossing release from becoming a speed impulse. |
+| LowSpeedCompensator | Supplies a 0.0008–0.005 Nm feed-forward/breakaway ramp while holding worsening I. | It is active only below 0.75 turn/s and fades with measured overspeed; the final threshold still needs HIL confirmation. |
 
 The present code has no abrupt value step in these linear blends, but it does have several slope and state transitions. A boundary test must measure final torque, not only individual gains.
 

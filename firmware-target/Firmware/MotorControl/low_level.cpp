@@ -537,16 +537,26 @@ void pwm_trig_adc_cb(ADC_HandleTypeDef* hadc, bool injected) {
     // Load next timings for the motor that we're not currently sampling
     if (update_timings) {
         if (!other_axis.motor_.next_timings_valid_) {
-            // the motor control loop failed to update the timings in time
-            // we must assume that it died and therefore float all phases
-            bool was_armed = safety_critical_disarm_motor_pwm(other_axis.motor_);
-            if (was_armed) {
-                other_axis.motor_.error_ |= Motor::ERROR_CONTROL_DEADLINE_MISSED;
+            // A single late control tick can be caused by a bounded encoder
+            // or calibration sample operation. Reuse the last valid duty for
+            // one PWM period; a second consecutive miss still floats all
+            // phases and latches the original deadline fault.
+            if (other_axis.motor_.armed_state_ == Motor::ARMED_STATE_ARMED &&
+                    other_axis.motor_.control_deadline_miss_count_ == 0) {
+                other_axis.motor_.control_deadline_miss_count_ = 1;
+                safety_critical_apply_motor_pwm_timings(
+                        other_axis.motor_, other_axis.motor_.next_timings_);
+            } else {
+                bool was_armed = safety_critical_disarm_motor_pwm(other_axis.motor_);
+                if (was_armed) {
+                    other_axis.motor_.error_ |= Motor::ERROR_CONTROL_DEADLINE_MISSED;
+                }
             }
         } else {
             other_axis.motor_.next_timings_valid_ = false;
+            other_axis.motor_.control_deadline_miss_count_ = 0;
             safety_critical_apply_motor_pwm_timings(
-                other_axis.motor_, other_axis.motor_.next_timings_
+                    other_axis.motor_, other_axis.motor_.next_timings_
             );
         }
         update_brake_current();

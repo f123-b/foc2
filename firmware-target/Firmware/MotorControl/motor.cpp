@@ -34,6 +34,8 @@ Motor::Motor(const MotorHardwareConfig_t& hw_config,
 // @returns: True on success, false otherwise
 bool Motor::arm() {
 
+    control_deadline_miss_count_ = 0;
+
     // Reset controller states, integrators, setpoints, etc.
     // Arming is part of the transition into closed-loop control.  Preserve a
     // cogging scan only for that explicit Idle -> closed-loop handoff.  A
