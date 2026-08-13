@@ -395,7 +395,7 @@ function ingestLine(line) {
     state.anticoggingIndex = 0;
     dom.calibrationStatus.textContent = 'ABZ 齿槽补偿标定中';
     dom.stepCalibration.textContent = '齿槽标定中 0%';
-    showToast('齿槽标定已开始：+2 / -2 turn/s，正反各采集 6 圈，预计 15～25 秒');
+    showToast('齿槽标定已开始：+1.2 / -1.2 turn/s，正反各采集 6 圈，预计 20～30 秒');
   }
   if (configReadQueue.length && !line.startsWith('ok ')) {
     const input = configReadQueue.shift();

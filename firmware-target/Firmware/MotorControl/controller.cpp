@@ -26,6 +26,7 @@ void Controller::reset(bool abort_anticogging) {
     abz_velocity_feedback_filter_.clear();
     velocity_control_feedback_ = 0.0f;
     velocity_control_feedback_valid_ = false;
+    overspeed_violation_count_ = 0;
     velocity_loop_torque_ = 0.0f;
     low_speed_compensator_.clear();
     low_speed_friction_torque_ = 0.0f;
@@ -54,8 +55,11 @@ float Controller::velocity_feedback_for_control(float raw_velocity,
     // higher speed its short horizon exposes position-synchronous ripple and
     // makes the velocity P term chase it. Blend by commanded speed so the
     // estimator selection cannot switch back and forth with feedback noise.
-    constexpr float pll_blend_start = 1.50f;
-    constexpr float pll_blend_end = 1.75f;
+    // The ABZ count-window is less sensitive to single PLL phase impulses in
+    // the 0.5--3 turn/s range used by the product. Keep it dominant there and
+    // only blend toward the PLL once the count stream is dense enough.
+    constexpr float pll_blend_start = 2.50f;
+    constexpr float pll_blend_end = 4.00f;
     const float pll_weight = std::clamp(
             (std::abs(commanded_velocity) - pll_blend_start) /
                     (pll_blend_end - pll_blend_start),
@@ -140,8 +144,10 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
                                              : CONTROL_MODE_POSITION_CONTROL;
         config_.input_mode = velocity_only ? INPUT_MODE_VEL_RAMP : INPUT_MODE_PASSTHROUGH;
         if (velocity_only) {
-            config_.vel_limit = std::min(2.2f, config_.vel_limit);
-            config_.vel_ramp_rate = 0.75f;
+            // A slower scan gives the ABZ window estimator time to settle and
+            // leaves current/velocity headroom for the reverse transition.
+            config_.vel_limit = std::min(1.5f, config_.vel_limit);
+            config_.vel_ramp_rate = 0.45f;
             anticogging_scan_phase_ = ANTICOGGING_SCAN_RAMP_FORWARD;
             anticogging_scan_start_pos_ = anticogging_calibration_base_pos_;
             anticogging_reverse_start_pos_ = anticogging_calibration_base_pos_;
@@ -149,7 +155,7 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
             std::fill(anticogging_forward_map_, anticogging_forward_map_ + 3600, 0);
             std::fill(anticogging_forward_count_, anticogging_forward_count_ + 3600, 0);
             std::fill(anticogging_reverse_count_, anticogging_reverse_count_ + 3600, 0);
-            input_vel_ = 2.0f;
+            input_vel_ = 1.2f;
         } else {
             input_pos_ = anticogging_calibration_base_pos_;
             input_vel_ = 0.0f;
@@ -173,12 +179,12 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
  */
 bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate) {
     if (anticogging_velocity_only_) {
-        constexpr float scan_speed = 2.0f;
+        constexpr float scan_speed = 1.2f;
         // The uncompensated rotor still has about +/-0.4 turn/s of
         // position-synchronous ripple at the otherwise stable 2 turn/s scan.
         // Keep the gate symmetric and bounded, but do not discard exactly the
         // high-cogging positions that the map needs to observe.
-        constexpr float scan_tolerance = 0.5f;
+        constexpr float scan_tolerance = 0.30f;
         constexpr float scan_turns = 6.0f;
         constexpr float torque_scale = 1000000.0f;
 
@@ -550,25 +556,40 @@ bool Controller::update(float* torque_setpoint_output) {
         vel_des = std::clamp(vel_des, -vel_lim, vel_lim);
     }
 
-    // Check for overspeed fault (done in this module (controller) for cohesion with vel_lim)
+    // Check for overspeed fault (done in this module (controller) for cohesion with vel_lim).
+    // Use the conditioned control feedback for ABZ and qualify the violation;
+    // raw encoder PLL impulses are not a reliable reason to drop PWM.
     if (config_.enable_overspeed_error) {  // 0.0f to disable
         if (!vel_estimate_src) {
             set_error(ERROR_INVALID_ESTIMATE);
             return false;
         }
         float overspeed_velocity = *vel_estimate_src;
-        if (config_.anticogging.calib_anticogging && anticogging_velocity_only_ &&
-                axis_->encoder_.mode_ == Encoder::MODE_INCREMENTAL &&
-                axis_->encoder_.incremental_window_velocity_valid_) {
-            // During the 2 turn/s scan the PLL is intentionally used by the
-            // velocity loop, but isolated PLL spikes must not abort the scan.
-            // The 10 ms count window still trips on sustained mechanical
-            // overspeed and leaves all non-calibration safety paths unchanged.
-            overspeed_velocity = axis_->encoder_.incremental_window_velocity_;
+        const bool abz_velocity_control =
+                (config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL ||
+                 config_.control_mode == CONTROL_MODE_POSITION_CONTROL) &&
+                axis_->encoder_.mode_ == Encoder::MODE_INCREMENTAL;
+        if (abz_velocity_control) {
+            if (config_.anticogging.calib_anticogging && anticogging_velocity_only_ &&
+                    axis_->encoder_.incremental_window_velocity_valid_) {
+                overspeed_velocity = axis_->encoder_.incremental_window_velocity_;
+            } else if (velocity_control_feedback_valid_) {
+                overspeed_velocity = velocity_control_feedback_;
+            } else {
+                overspeed_velocity = velocity_feedback_for_control(*vel_estimate_src, vel_des);
+            }
         }
-        if (std::abs(overspeed_velocity) > config_.vel_limit_tolerance * vel_lim) {
-            set_error(ERROR_OVERSPEED);
-            return false;
+        const float overspeed_limit = std::abs(config_.vel_limit_tolerance * vel_lim);
+        if (std::isfinite(overspeed_limit) && overspeed_limit > 0.0f &&
+                std::abs(overspeed_velocity) > overspeed_limit) {
+            // 16 control cycles is short enough to catch a real runaway while
+            // rejecting the one-to-three-cycle impulses visible in ABZ plots.
+            if (++overspeed_violation_count_ >= 16) {
+                set_error(ERROR_OVERSPEED);
+                return false;
+            }
+        } else {
+            overspeed_violation_count_ = 0;
         }
     }
 
@@ -669,7 +690,7 @@ bool Controller::update(float* torque_setpoint_output) {
             const float bandwidth_blend = std::clamp(
                     (std::abs(vel_des) - 1.0f) / 1.0f, 0.0f, 1.0f);
             const float feedback_bandwidth_hz =
-                    8.0f + bandwidth_blend * 7.0f;
+                    6.0f + bandwidth_blend * 6.0f;
             velocity_feedback = abz_velocity_feedback_filter_.update(
                     selected_velocity_feedback, current_meas_period,
                     feedback_bandwidth_hz);
