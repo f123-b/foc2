@@ -58,8 +58,8 @@ public:
     // the 4 mNm running value.  That value is adequate above the sparse-count
     // region, but it lets this motor stop again at 0.2--1.0 turn/s.  Keep the
     // nominal hold torque through 1 turn/s and taper it out by 1.5 turn/s;
-    // the controller's separate low-speed fade still keeps the added torque
-    // out of the normal 1.5--2 turn/s operating band.
+    // the controller's separate low-speed fade keeps the added torque out of
+    // the normal 1.5--2 turn/s operating band.
     static constexpr float low_speed_hold_end = 1.0f;
     static constexpr float low_speed_hold_fade_end = 1.5f;
     static constexpr float torque_rise_rate = 0.0180f;

@@ -20,12 +20,12 @@ FOC Studio / other host
 
 ## ABZ speed feedback path
 
-For incremental encoders, `Encoder::update()` maintains the normal PLL (`vel_estimate_`) and, only for diagnostics/cascaded ABZ control, a rolling 120-sample count sum. At the nominal 8 kHz current loop this is a 15 ms window:
+For incremental encoders, `Encoder::update()` maintains the normal PLL (`vel_estimate_`) and, only for diagnostics/cascaded ABZ control, a rolling 400-sample count sum. At the nominal 8 kHz current loop this is a 50 ms window:
 
 ```text
 timer count -> delta_enc -> shadow_count
                       +-> encoder PLL -> raw_velocity
-                      +-> 120-tick rolling sum / (4000 CPR * elapsed) -> window_velocity
+                      +-> 400-tick rolling sum / (4000 CPR * elapsed) -> window_velocity
 raw + window -> Controller::velocity_feedback_for_control()
              -> command-speed blend: window below 2.50 turn/s, PLL above 4 turn/s
              -> VelocityFeedbackFilter: 6 Hz at <=1 turn/s, linear to 12 Hz at 2 turn/s
@@ -39,12 +39,12 @@ The command, not measured speed, selects the 2.50–4.00 turn/s blend. That prev
 
 | Stage | Purpose | Cost/risk |
 |---|---|---|
-| 15 ms rolling window | Avoid PLL zero-speed deadband and update every control tick. | Quantized at 4000 CPR: one count per 15 ms equals 0.0167 turn/s; moving window adds roughly half-window observation delay and correlated steps. |
+| 50 ms rolling window | Avoid PLL zero-speed deadband and update every control tick. | Quantized at 4000 CPR: one count per 50 ms equals 0.005 turn/s; moving window adds roughly half-window observation delay but greatly reduces correlated steps. |
 | Command-speed blend | Avoid estimator source toggling. | Window feedback remains dominant below 2.5 turn/s and blends to PLL by 4 turn/s; command-based selection avoids estimator chatter. |
 | 6–12 Hz one-pole LPF | Prevent P/I chasing edge impulses. | A first-order lag has material phase delay near its bandwidth, compounded with window delay; bandwidth changes continuously in value but has slope break at 1/2 turn/s. |
 | Gain schedule | Lowers low-speed P/I so breakaway torque is supplied by one bounded source. | Continuous at 1.00/1.75 in value, but effective gains differ from host-visible configured values. |
 | I clamp | Limits stored energy to 0–0.0045 Nm, blended in from 1.0 to 1.75 turn/s. | Bounds windup and prevents a tooth-crossing release from becoming a speed impulse. |
-| LowSpeedCompensator | Supplies a 0.004–0.018 Nm feed-forward/breakaway ramp, adds bounded positive-speed-error assist and a low-speed hold term, and holds worsening I. | It may use the extended ceiling below 0.5 turn/s; after breakaway, the running hold is 0.014 Nm through 1.0 turn/s and tapers to 0.004 Nm by 1.5 turn/s, while the controller fade keeps it out of the normal 1.5–2.0 turn/s band. Recovery requires both forward encoder progress and 12 ms at ≥55% of the commanded speed, so low-speed count dither cannot unload the torque prematurely. |
+| LowSpeedCompensator | Supplies a 0.004–0.018 Nm feed-forward/breakaway ramp, adds bounded positive-speed-error assist and a low-speed hold term, and holds worsening I. | It may use the extended ceiling below 0.5 turn/s; after breakaway, the running hold is 0.014 Nm through 1.0 turn/s and tapers to 0.004 Nm by 2.0 turn/s. The controller keeps the complete helper through 2.0 turn/s, then fades it only across the denser 2.0–2.5 turn/s transition. Recovery requires both forward encoder progress and 12 ms at ≥55% of the commanded speed, so low-speed count dither cannot unload the torque prematurely. |
 
 The present code has no abrupt value step in these linear blends, but it does have several slope and state transitions. A boundary test must measure final torque, not only individual gains.
 

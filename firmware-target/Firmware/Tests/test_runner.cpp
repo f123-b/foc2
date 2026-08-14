@@ -119,6 +119,13 @@ TEST_SUITE("velocity_feedback_filter") {
         CHECK(output == doctest::Approx(1.0f).epsilon(0.02f));
     }
 
+    TEST_CASE("limits a single feedback burst") {
+        VelocityFeedbackFilter filter;
+        filter.reset(0.2f);
+        const float output = filter.update(8.0f, 0.000125f, 12.0f);
+        CHECK(output < 0.21f);
+    }
+
     TEST_CASE("converges to a real speed change") {
         VelocityFeedbackFilter filter;
         filter.reset(0.0f);
@@ -194,6 +201,9 @@ TEST_SUITE("low_speed_compensator") {
         CHECK(LowSpeedCompensator::running_torque_for_command(1.25f) ==
                 doctest::Approx(0.0090f).epsilon(0.02f));
         CHECK(LowSpeedCompensator::running_torque_for_command(1.5f) ==
+                doctest::Approx(0.0090f)
+                        .epsilon(0.02f));
+        CHECK(LowSpeedCompensator::running_torque_for_command(2.0f) ==
                 doctest::Approx(LowSpeedCompensator::running_torque)
                         .epsilon(0.02f));
     }

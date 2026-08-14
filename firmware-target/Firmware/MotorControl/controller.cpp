@@ -2,12 +2,11 @@
 #include "odrive_main.h"
 #include <algorithm>
 
-// FOC Studio uses one characterised ABZ velocity profile for both normal
-// speed commands and the cogging-map scan.  Keeping these values together is
-// important: a map measured at a different speed contains the velocity-loop
-// transient and cannot be reused as a feed-forward at the requested speed.
-static constexpr float FOC_STUDIO_ABZ_SPEED = 2.0f;       // turn/s
-static constexpr float FOC_STUDIO_ABZ_RAMP_RATE = 0.3f;   // turn/s^2
+// The cogging-map scan uses a conservative speed/ramp that leaves headroom
+// for the ABZ estimator and the direction reversal. The normal velocity
+// command uses its ordinary ramp independently.
+static constexpr float FOC_STUDIO_ABZ_SCAN_SPEED = 1.2f;       // turn/s
+static constexpr float FOC_STUDIO_ABZ_SCAN_RAMP_RATE = 0.45f;  // turn/s^2
 
 Controller::Controller(Config_t& config) :
     config_(config)
@@ -18,6 +17,7 @@ Controller::Controller(Config_t& config) :
 void Controller::reset(bool abort_anticogging) {
     if (abort_anticogging && config_.anticogging.calib_anticogging) {
         config_.anticogging.calib_anticogging = false;
+        anticogging_velocity_only_ = false;
         config_.anticogging.index = 0;
         anticogging_sample_sum_ = 0.0f;
         anticogging_sample_count_ = 0;
@@ -34,6 +34,7 @@ void Controller::reset(bool abort_anticogging) {
     velocity_control_feedback_ = 0.0f;
     velocity_control_feedback_valid_ = false;
     overspeed_violation_count_ = 0;
+    raw_overspeed_lead_count_ = 0;
     velocity_loop_torque_ = 0.0f;
     low_speed_compensator_.clear();
     low_speed_friction_torque_ = 0.0f;
@@ -76,10 +77,18 @@ float Controller::velocity_feedback_for_control(float raw_velocity,
 }
 
 float Controller::velocity_feedback_for_telemetry(float raw_velocity) const {
-    if ((config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL ||
-         config_.control_mode == CONTROL_MODE_POSITION_CONTROL) &&
-            velocity_control_feedback_valid_) {
-        return velocity_control_feedback_;
+    if (config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL ||
+            config_.control_mode == CONTROL_MODE_POSITION_CONTROL) {
+        // Telemetry should describe the measured mechanical speed, not the
+        // delayed feedback value used internally to keep the loop quiet.
+        // The 50 ms ABZ count window is already a physical-speed average and
+        // is much less misleading at low speed.
+        if (axis_ && axis_->encoder_.mode_ == Encoder::MODE_INCREMENTAL &&
+                axis_->encoder_.incremental_window_velocity_valid_) {
+            return axis_->encoder_.incremental_window_velocity_;
+        }
+        if (velocity_control_feedback_valid_)
+            return velocity_control_feedback_;
     }
     return raw_velocity;
 }
@@ -151,12 +160,11 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
                                              : CONTROL_MODE_POSITION_CONTROL;
         config_.input_mode = velocity_only ? INPUT_MODE_VEL_RAMP : INPUT_MODE_PASSTHROUGH;
         if (velocity_only) {
-            // Use exactly the same speed/ramp profile as FOC Studio's normal
-            // ABZ speed mode.  Sampling at a separate 1.2/1.5 turn/s profile
-            // produces a map that changes the loop gain and speed when it is
-            // later applied at the 2 turn/s operating point.
-            config_.vel_limit = std::min(2.2f, config_.vel_limit);
-            config_.vel_ramp_rate = FOC_STUDIO_ABZ_RAMP_RATE;
+            // Keep the scan below the normal 2 turn/s operating point. This
+            // is deliberate: the ABZ count feedback and the breakaway assist
+            // need speed/current headroom during startup and reversal.
+            config_.vel_limit = std::min(1.5f, config_.vel_limit);
+            config_.vel_ramp_rate = FOC_STUDIO_ABZ_SCAN_RAMP_RATE;
             anticogging_scan_phase_ = ANTICOGGING_SCAN_RAMP_FORWARD;
             anticogging_scan_start_pos_ = anticogging_calibration_base_pos_;
             anticogging_reverse_start_pos_ = anticogging_calibration_base_pos_;
@@ -164,7 +172,7 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
             std::fill(anticogging_forward_map_, anticogging_forward_map_ + 3600, 0);
             std::fill(anticogging_forward_count_, anticogging_forward_count_ + 3600, 0);
             std::fill(anticogging_reverse_count_, anticogging_reverse_count_ + 3600, 0);
-            input_vel_ = FOC_STUDIO_ABZ_SPEED;
+            input_vel_ = FOC_STUDIO_ABZ_SCAN_SPEED;
         } else {
             input_pos_ = anticogging_calibration_base_pos_;
             input_vel_ = 0.0f;
@@ -188,11 +196,14 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
  */
 bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate) {
     if (anticogging_velocity_only_) {
-        constexpr float scan_speed = FOC_STUDIO_ABZ_SPEED;
+        constexpr float scan_speed = FOC_STUDIO_ABZ_SCAN_SPEED;
         // The ABZ count-window contains position-synchronous ripple at the
-        // scan speed.  A symmetric gate keeps the map coverage high without
+        // scan speed. A symmetric gate keeps the map coverage high without
         // accepting a stalled or runaway interval.
-        constexpr float scan_tolerance = 0.45f;
+        // Keep the gate wide enough for the filtered ABZ ripple at the
+        // conservative scan speed. The overspeed guard remains independent,
+        // so this only decides whether a map bin is usable.
+        constexpr float scan_tolerance = 0.85f;
         constexpr float scan_turns = 6.0f;
         constexpr float torque_scale = 1000000.0f;
 
@@ -214,10 +225,14 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
             if (wrapped_bin < 0)
                 wrapped_bin += 3600;
             const uint32_t index = static_cast<uint32_t>(wrapped_bin);
-            // The proportional term carries most position-synchronous torque
-            // during a constant-speed scan. Recording only the integrator
-            // produces an almost flat map and leaves cogging uncompensated.
-            const float sample = std::clamp(velocity_loop_torque_, -0.012f, 0.012f);
+            // Record the complete non-map torque used by the scan. The
+            // low-speed helper contains the actual breakaway torque needed by
+            // this motor; omitting it makes the resulting map nearly flat.
+            // Averaging forward and reverse passes cancels the direction-only
+            // static friction and keeps the position-synchronous cogging term.
+            const float sample = std::clamp(
+                    velocity_loop_torque_ + low_speed_friction_torque_,
+                    -0.012f, 0.012f);
             if (!reverse) {
                 uint8_t& count = anticogging_forward_count_[index];
                 const int32_t old_mean = anticogging_forward_map_[index];
@@ -241,6 +256,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
             case ANTICOGGING_SCAN_RAMP_FORWARD:
                 input_vel_ = scan_speed;
                 if (vel_setpoint_ >= scan_speed - 0.01f &&
+                        std::abs(vel_estimate) >= 0.15f &&
                         std::abs(vel_estimate - scan_speed) <= scan_tolerance) {
                     anticogging_scan_start_pos_ = pos_estimate;
                     anticogging_sample_position_valid_ = false;
@@ -260,6 +276,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
             case ANTICOGGING_SCAN_RAMP_REVERSE:
                 input_vel_ = -scan_speed;
                 if (vel_setpoint_ <= -scan_speed + 0.01f &&
+                        std::abs(vel_estimate) >= 0.15f &&
                         std::abs(vel_estimate + scan_speed) <= scan_tolerance) {
                     anticogging_reverse_start_pos_ = pos_estimate;
                     anticogging_sample_position_valid_ = false;
@@ -578,10 +595,12 @@ bool Controller::update(float* torque_setpoint_output) {
                  config_.control_mode == CONTROL_MODE_POSITION_CONTROL) &&
                 axis_->encoder_.mode_ == Encoder::MODE_INCREMENTAL;
         if (abz_velocity_control) {
-            if (config_.anticogging.calib_anticogging && anticogging_velocity_only_ &&
-                    axis_->encoder_.incremental_window_velocity_valid_) {
-                overspeed_velocity = axis_->encoder_.incremental_window_velocity_;
-            } else if (velocity_control_feedback_valid_) {
+            // The rolling count window is useful for the velocity loop, but it
+            // is not a safety signal during a scan: one position-synchronous
+            // burst can report 4+ turn/s while the filtered plant speed is
+            // still near the 2 turn/s target. Use the same conditioned value
+            // that drives P/I for the qualified overspeed check.
+            if (velocity_control_feedback_valid_) {
                 overspeed_velocity = velocity_control_feedback_;
             } else {
                 overspeed_velocity = velocity_feedback_for_control(*vel_estimate_src, vel_des);
@@ -617,6 +636,8 @@ bool Controller::update(float* torque_setpoint_output) {
             (config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL ||
              config_.control_mode == CONTROL_MODE_POSITION_CONTROL) &&
             axis_->encoder_.mode_ == Encoder::MODE_INCREMENTAL;
+    const bool anticogging_scan_active =
+            config_.anticogging.calib_anticogging && anticogging_velocity_only_;
     if (cascaded_abz_mode) {
         const float command_speed = std::abs(vel_des);
         const float high_speed_blend = std::clamp(
@@ -652,16 +673,13 @@ bool Controller::update(float* torque_setpoint_output) {
                 config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL &&
                 axis_->encoder_.mode_ == Encoder::MODE_INCREMENTAL;
         if (anticogging_velocity_only_ && abz_velocity_mode) {
-            // Keep the scan map out of the sparse-count region.  The map is a
-            // feed-forward correction, not breakaway torque; applying it while
-            // the low-speed helper is still active adds a second torque source
-            // and was the main cause of the 1.0-1.5 turn/s stick-slip bursts.
+            // The map is useful precisely where cogging causes the low-speed
+            // stick-slip. Blend it in gradually so enabling a completed map
+            // cannot create a torque step at the first command.
             const float command_speed = std::abs(vel_des);
             const float speed_blend = std::clamp(
-                    (command_speed - 2.00f) / 0.50f, 0.0f, 1.0f);
-            // Start below unity to avoid a current step on the first run; the
-            // map itself is bounded to +/-8 mNm during finalisation.
-            anticogging_scale = 0.35f * speed_blend;
+                    command_speed / 0.50f, 0.0f, 1.0f);
+            anticogging_scale = speed_blend;
         } else if (anticogging_velocity_only_) {
             // A map produced by the ABZ velocity scan is not valid for the
             // other controller modes. In particular, do not change torque
@@ -699,7 +717,7 @@ bool Controller::update(float* torque_setpoint_output) {
                 *vel_estimate_src, vel_des);
         float velocity_feedback = selected_velocity_feedback;
         if (cascaded_abz_mode) {
-            // The 15 ms count window and the PLL both contain count-edge
+            // The 50 ms count window and the PLL both contain count-edge
             // impulses. Condition their already speed-blended result before
             // either P or I sees it. The bandwidth rises toward 2 turn/s to
             // retain braking response while removing the 1 turn/s ripple.
@@ -716,19 +734,50 @@ bool Controller::update(float* torque_setpoint_output) {
         velocity_control_feedback_ = velocity_feedback;
         velocity_control_feedback_valid_ = true;
         // Keep the filtered value throughout the sparse-count region.  A
-        // 15 ms ABZ window can jump by several tenths of a turn/s on one
+        // 50 ms ABZ window is much less sensitive to a single count edge, but
+        // the remaining quantisation can still jump by a few hundredths of
+        // a turn/s on one
         // encoder edge; feeding that single sample to P/compensation makes a
         // 0.2--1.0 turn/s command look like overspeed and removes the torque
         // needed to cross the next tooth.  Once the command reaches 2 turn/s
         // the count stream is dense enough to use the instantaneous sample
         // for a fast overspeed brake.
         float velocity_error_feedback = velocity_feedback;
-        if (cascaded_abz_mode && std::abs(vel_des) >= 2.0f) {
-            const float command_sign = vel_des > 0.0f ? 1.0f : -1.0f;
-            if (selected_velocity_feedback * command_sign >
-                    velocity_feedback * command_sign + 0.02f) {
+        const float command_speed = std::abs(vel_des);
+        if (cascaded_abz_mode) {
+            // The PLL is noisy at low speed, but a sustained PLL overspeed is
+            // the fastest reliable brake when the count window lags. Require
+            // several consecutive control cycles so one position-synchronous
+            // burst cannot make the loop oscillate.
+            const float command_sign = command_speed > 0.002f
+                    ? (vel_des > 0.0f ? 1.0f : -1.0f)
+                    : (*vel_estimate_src >= 0.0f ? 1.0f : -1.0f);
+            const float raw_forward_speed = *vel_estimate_src * command_sign;
+            // Below 1 turn/s the PLL's normal position-synchronous bursts can
+            // exceed 0.5 turn/s even while the rotor is not running away.
+            // Keep a higher floor for the raw lead; a real runaway is still
+            // caught once it reaches the same multi-turn/s range as the scan.
+            const float gross_overspeed = std::max(
+                    1.5f, 2.0f * command_speed);
+            const bool raw_gross_overspeed = raw_forward_speed > std::max(
+                    std::abs(velocity_feedback) + 0.05f, gross_overspeed);
+            if (raw_gross_overspeed) {
+                raw_overspeed_lead_count_ = std::min<uint8_t>(
+                        8, static_cast<uint8_t>(raw_overspeed_lead_count_ + 1));
+            } else {
+                raw_overspeed_lead_count_ = 0;
+            }
+            if (raw_overspeed_lead_count_ >= 4) {
+                velocity_error_feedback = *vel_estimate_src;
+            } else if (command_speed >= 2.0f &&
+                    selected_velocity_feedback * command_sign >
+                            velocity_feedback * command_sign + 0.02f) {
+                // At the dense-count operating point the selected window can
+                // still provide a useful one-cycle braking lead.
                 velocity_error_feedback = selected_velocity_feedback;
             }
+        } else {
+            raw_overspeed_lead_count_ = 0;
         }
         v_err = vel_des - velocity_error_feedback;
         integral_v_err = v_err;
@@ -737,13 +786,14 @@ bool Controller::update(float* torque_setpoint_output) {
         torque += proportional_torque;
 
         if (cascaded_abz_mode) {
-            // Keep the helper active through the sparse-count range. It is
-            // full-strength up to 1 turn/s and fades out by 2 turn/s;
-            // this prevents the 1.0--1.5 turn/s commands from falling into
-            // the gap between static-friction compensation and the dense
-            // velocity loop.
+            // Keep the scan's breakaway assist enabled so a stationary rotor
+            // can cross the first tooth.  In normal velocity control, return
+            // to the proven fade-out below 2 turn/s; holding full assist all
+            // the way to the command speed can outrun the slow ramp and make
+            // the velocity loop oscillate before feedback catches up.
             const float low_speed_scale = std::clamp(
-                    (2.00f - std::abs(vel_des)) / 1.00f, 0.0f, 1.0f);
+                    (2.00f - command_speed) / 1.00f, 0.0f, 1.0f) *
+                    std::clamp(command_speed / 0.35f, 0.0f, 1.0f);
             if (low_speed_scale > 0.0f) {
                 const bool abz_position_mode =
                         config_.control_mode == CONTROL_MODE_POSITION_CONTROL;
@@ -858,13 +908,18 @@ bool Controller::update(float* torque_setpoint_output) {
         // reset integral if not in use
         vel_integrator_torque_ = 0.0f;
     } else {
-        if (limited) {
+        if (anticogging_scan_active) {
+            // A scan records the bounded P response. Do not let an estimator
+            // transient accumulate an integral burst that is then interpreted
+            // as cogging torque or released during the direction reversal.
+            vel_integrator_torque_ = 0.0f;
+        } else if (limited) {
             // TODO make decayfactor configurable
             vel_integrator_torque_ *= 0.99f;
         } else {
             vel_integrator_torque_ += ((vel_integrator_gain * gain_scheduling_multiplier) * current_meas_period) * integral_v_err;
         }
-        if (cascaded_abz_mode) {
+        if (cascaded_abz_mode && !anticogging_scan_active) {
             // Keep the incremental-encoder integrator bounded and blend it in
             // only after the sparse-count/static-friction region.
             const float integral_blend = std::clamp(

@@ -79,9 +79,14 @@ public:
     float pos_estimate_counts_ = 0.0f;  // [count]
     float pos_cpr_counts_ = 0.0f;  // [count]
     float vel_estimate_counts_ = 0.0f;  // [count/s]
-    // Rolling 15 ms count-window estimator used only by the ABZ velocity
+    // Rolling 50 ms count-window estimator used only by the ABZ velocity
     // controller. Position, commutation and safety keep using the PLL state.
-    static constexpr uint16_t incremental_velocity_window_samples_ = 120;
+    //
+    // At 4000 CPR, a 15 ms window quantises low-speed feedback in steps of
+    // roughly 0.0167 turn/s and produces visible edge bursts below 2 turn/s.
+    // The longer window reduces that step to about 0.005 turn/s while the
+    // outer velocity filter keeps the added observation delay bounded.
+    static constexpr uint16_t incremental_velocity_window_samples_ = 400;
     int32_t incremental_velocity_delta_history_[incremental_velocity_window_samples_] = {};
     uint16_t incremental_velocity_history_index_ = 0;
     uint16_t incremental_velocity_history_count_ = 0;

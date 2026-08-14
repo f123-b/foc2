@@ -1,0 +1,18 @@
+Start testing: Aug 14 16:45 中国标准时间
+----------------------------------------------------------
+1/1 Testing: foc2_core_tests
+1/1 Test: foc2_core_tests
+Command: "D:/foc-master/foc-master/firmware/build-host/foc2_core_tests.exe"
+Directory: D:/foc-master/foc-master/firmware/build-host
+"foc2_core_tests" start time: Aug 14 16:45 中国标准时间
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"foc2_core_tests" end time: Aug 14 16:45 中国标准时间
+"foc2_core_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Aug 14 16:45 中国标准时间

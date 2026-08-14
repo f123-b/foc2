@@ -119,6 +119,7 @@ public:
     // not abort a running scan or speed command. Require a short consecutive
     // violation window before latching the controller fault.
     uint16_t overspeed_violation_count_ = 0;
+    uint8_t raw_overspeed_lead_count_ = 0;
     // P + I torque actually used by the velocity loop in the previous control
     // cycle. The bidirectional cogging scan samples this rather than I alone.
     float velocity_loop_torque_ = 0.0f;

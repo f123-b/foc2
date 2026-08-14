@@ -76,6 +76,7 @@ static FocVelocityTuningState foc_velocity_tuning[AXIS_COUNT] = {};
 
 struct FocPositionLimitState {
     bool active;
+    bool cogging_calibration;
     float vel_limit;
     float torque_limit;
     float pos_gain;
@@ -92,11 +93,6 @@ struct FocTorqueSafetyState {
 
 static FocPositionLimitState foc_position_limits[AXIS_COUNT] = {};
 static FocTorqueSafetyState foc_torque_safety[AXIS_COUNT] = {};
-
-// Torque mode is open-loop with respect to speed. Keep its existing torque
-// command path, but apply a conservative velocity boundary so a sustained
-// torque command cannot run the motor into an overspeed/current fault.
-static constexpr float FOC_TORQUE_MODE_VEL_LIMIT = 2.0f;
 
 static uint8_t get_foc_feedback_mode(unsigned axis_num) {
     if (foc_feedback_modes[axis_num] == 0xff) {
@@ -132,6 +128,7 @@ static void restore_foc_position_limits(Axis* axis) {
     axis->controller_.config_.pos_gain = limits.pos_gain;
     axis->controller_.config_.vel_limit_tolerance = limits.vel_limit_tolerance;
     limits.active = false;
+    limits.cogging_calibration = false;
 }
 
 static void apply_foc_position_limits(Axis* axis, float vel_limit, float torque_limit) {
@@ -147,6 +144,14 @@ static void apply_foc_position_limits(Axis* axis, float vel_limit, float torque_
     axis->motor_.config_.torque_lim = std::min(std::abs(torque_limit), limits.torque_limit);
     axis->controller_.config_.pos_gain = std::min(1.0f, limits.pos_gain);
     axis->controller_.config_.vel_limit_tolerance = std::max(2.0f, limits.vel_limit_tolerance);
+}
+
+static void restore_completed_cogging_limits(Axis* axis) {
+    FocPositionLimitState& limits = foc_position_limits[axis->axis_num_];
+    if (limits.active && limits.cogging_calibration &&
+            !axis->controller_.config_.anticogging.calib_anticogging) {
+        restore_foc_position_limits(axis);
+    }
 }
 
 static void restore_foc_torque_safety(Axis* axis) {
@@ -171,12 +176,10 @@ static void apply_foc_torque_safety(Axis* axis) {
         safety.enable_overspeed_error = axis->controller_.config_.enable_overspeed_error;
         safety.active = true;
     }
-    // Preserve the torque command path, while bounding the speed at the
-    // proven low-speed operating limit. The configured limit remains the
-    // tighter bound when it is already lower than this safety ceiling.
-    axis->controller_.config_.vel_limit = std::min(
-            std::abs(axis->controller_.config_.vel_limit), FOC_TORQUE_MODE_VEL_LIMIT);
-    axis->controller_.config_.enable_current_mode_vel_limit = true;
+    // Torque mode must preserve the requested torque instead of silently
+    // clamping it against a software velocity target. The independent
+    // overspeed fault, motor current limit and thermal protection remain on.
+    axis->controller_.config_.enable_current_mode_vel_limit = false;
     axis->controller_.config_.enable_overspeed_error = true;
 }
 
@@ -196,7 +199,10 @@ static void apply_foc_velocity_tuning(Axis* axis) {
     // commanded speed approaches the proven 2 turn/s operating region.
     controller.vel_gain = 0.0025f;
     controller.vel_integrator_gain = 0.01f;
-    controller.vel_ramp_rate = 0.3f;
+    // Normal commands should reach the requested speed before the low-speed
+    // breakaway assist builds a large torque. The cogging scan overrides this
+    // with its deliberately slow 0.45 turn/s^2 ramp when it starts.
+    controller.vel_ramp_rate = 1.0f;
     controller.input_mode = Controller::INPUT_MODE_VEL_RAMP;
 }
 
@@ -337,6 +343,13 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
         len = checksum_start - 1; // prune checksum and asterisk
         cmd[len] = 0; // null-terminate
     }
+
+    // A completed or fault-aborted cogging scan leaves the axis in Idle, but
+    // the scan limits must not leak into the next speed command or a Flash
+    // save. Telemetry/commands are serviced frequently, so clean this up at
+    // the protocol boundary as soon as the controller clears its scan flag.
+    for (unsigned axis_num = 0; axis_num < AXIS_COUNT; ++axis_num)
+        restore_completed_cogging_limits(axes[axis_num]);
 
 
     // check incoming packet type
@@ -515,6 +528,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                 restore_foc_torque_safety(axis);
                 set_foc_control_mode(axis, Controller::CONTROL_MODE_VELOCITY_CONTROL);
                 apply_foc_position_limits(axis, 2.2f, 0.015f);
+                foc_position_limits[axis->axis_num_].cogging_calibration = true;
                 axis->controller_.start_anticogging_calibration(true);
                 axis->requested_state_ = Axis::AXIS_STATE_CLOSED_LOOP_CONTROL;
                 axis->watchdog_feed();

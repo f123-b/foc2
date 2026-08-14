@@ -1,0 +1,5 @@
+D:/foc-master/foc-master/firmware/build-host/CMakeFiles/foc2_core.dir
+D:/foc-master/foc-master/firmware/build-host/CMakeFiles/foc2_core_tests.dir
+D:/foc-master/foc-master/firmware/build-host/CMakeFiles/test.dir
+D:/foc-master/foc-master/firmware/build-host/CMakeFiles/edit_cache.dir
+D:/foc-master/foc-master/firmware/build-host/CMakeFiles/rebuild_cache.dir
