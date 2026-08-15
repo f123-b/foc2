@@ -91,6 +91,7 @@ public:
     void start_anticogging_calibration() override;
     void start_anticogging_calibration(bool velocity_only);
     bool anticogging_calibration(float pos_estimate, float vel_estimate);
+    void abort_anticogging_calibration(uint8_t reason);
 
     void update_filter_gains();
     bool update(float* torque_setpoint);
@@ -198,6 +199,10 @@ public:
         ANTICOGGING_SCAN_REVERSE,
         ANTICOGGING_SCAN_FINALIZE,
         ANTICOGGING_SCAN_SMOOTH,
+        ANTICOGGING_SCAN_STATS,
+        ANTICOGGING_SCAN_VALIDATE,
+        ANTICOGGING_SCAN_COMPLETE,
+        ANTICOGGING_SCAN_FAILED,
     };
     AnticoggingScanPhase anticogging_scan_phase_ = ANTICOGGING_SCAN_IDLE;
     float anticogging_scan_start_pos_ = 0.0f;
@@ -225,7 +230,15 @@ public:
     float anticogging_map_peak_to_peak_ = 0.0f;
     float anticogging_map_max_jump_ = 0.0f;
     float anticogging_map_wrap_jump_ = 0.0f;
-    bool anticogging_stats_computed_ = false;
+    float anticogging_map_max_abs_ = 0.0f;
+    float anticogging_map_min_ = 0.0f;
+    float anticogging_map_max_ = 0.0f;
+    float anticogging_map_sum_sq_ = 0.0f;
+    float anticogging_map_first_ = 0.0f;
+    float anticogging_map_last_ = 0.0f;
+    uint16_t anticogging_stats_index_ = 0;
+    bool anticogging_calibration_failed_ = false;
+    uint8_t anticogging_calibration_abort_reason_ = 0;
 
     // custom setters
     void set_input_pos(float value) { input_pos_ = value; input_pos_updated(); }

@@ -154,7 +154,10 @@ export function parseTelemetry(line) {
     anticoggingMapWrapJump = 0,
     anticoggingForwardValidBins = 0, anticoggingReverseValidBins = 0,
     anticoggingRejectedVelocitySamples = 0, anticoggingRejectedReverseSamples = 0,
-    anticoggingRejectedStateSamples = 0, anticoggingRejectedSaturationSamples = 0] = values;
+    anticoggingRejectedStateSamples = 0, anticoggingRejectedSaturationSamples = 0,
+    anticoggingMapMaxAbs = 0, anticoggingCalibrationFailed = 0,
+    anticoggingCalibrationAbortReason = 0, anticoggingStatsIndex = 0,
+    anticoggingPostprocessIndex = 0] = values;
   return {
     axisState: AXIS_STATE[state] ?? `状态 ${state}`,
     stateCode: state,
@@ -200,6 +203,11 @@ export function parseTelemetry(line) {
     anticoggingRejectedReverseSamples,
     anticoggingRejectedStateSamples,
     anticoggingRejectedSaturationSamples,
+    anticoggingMapMaxAbs,
+    anticoggingCalibrationFailed,
+    anticoggingCalibrationAbortReason,
+    anticoggingStatsIndex,
+    anticoggingPostprocessIndex,
   };
 }
 

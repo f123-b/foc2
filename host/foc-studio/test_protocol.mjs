@@ -28,6 +28,9 @@ assert.deepEqual(parseTelemetry('@ 8 0 12.5 -1.25 3.5 12.2 35 1 -0.004 4'), {
   anticoggingForwardValidBins: 0, anticoggingReverseValidBins: 0,
   anticoggingRejectedVelocitySamples: 0, anticoggingRejectedReverseSamples: 0,
   anticoggingRejectedStateSamples: 0, anticoggingRejectedSaturationSamples: 0,
+  anticoggingMapMaxAbs: 0, anticoggingCalibrationFailed: 0,
+  anticoggingCalibrationAbortReason: 0, anticoggingStatsIndex: 0,
+  anticoggingPostprocessIndex: 0,
 });
 const detailed = parseTelemetry('@ 1 320 0 0 3.5 12.2 35 0 0 0 8 128 32 0 0 0 1 -1 0 0');
 assert.equal(detailed.motorError, 8);

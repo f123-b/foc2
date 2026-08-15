@@ -25,46 +25,36 @@ static constexpr uint32_t ANTICOGGING_POSITION_SCAN_STEP_BINS = 10;
 static constexpr uint32_t ANTICOGGING_POSITION_SCAN_POINTS =
         3600 / ANTICOGGING_POSITION_SCAN_STEP_BINS;  // 360
 
-// Validate a finished 3600-bin cogging map. A map that is under-covered, flat,
-// saturated, spiky, or discontinuous at the 0/360 wrap point must never be
-// applied as a feed-forward.
-static bool anticogging_map_quality_ok(const float* map, uint32_t valid_bins,
-                                       uint32_t total_bins) {
+// Post-processing (finalize/smooth/stats) is spread over control cycles so a
+// single control tick never walks the full 3600-bin map and misses the PWM
+// deadline.
+static constexpr uint16_t ANTICOGGING_POSTPROCESS_BINS_PER_CYCLE = 4;
+
+// Validate a finished cogging map from pre-computed statistics (O(1), no map
+// walk). A map that is under-covered, flat, saturated, spiky, or discontinuous
+// at the 0/360 wrap point must never be applied as a feed-forward.
+static bool anticogging_map_quality_ok(uint32_t valid_bins, uint32_t total_bins,
+                                       float peak_to_peak, float max_abs,
+                                       float max_jump, float wrap_jump) {
     if (total_bins == 0)
         return false;
     // Coverage: at least 80% of the bins must have a sample.
     if (valid_bins * 5u < total_bins * 4u)
         return false;
-
-    float lo = 1e9f, hi = -1e9f;
-    float prev = map[3599];
-    float max_jump = 0.0f;
-    for (uint32_t i = 0; i < 3600; ++i) {
-        const float v = map[i];
-        lo = std::min(lo, v);
-        hi = std::max(hi, v);
-        max_jump = std::max(max_jump, std::abs(v - prev));
-        prev = v;
-    }
-    const float peak_to_peak = hi - lo;
-    const float wrap_jump = std::abs(map[3599] - map[0]);
-
     // Torque amplitude: a useful map has structure but stays well below the
     // +/-0.012 Nm sample clamp (a saturated map means the scan torque ran away).
     if (peak_to_peak < 0.001f)
         return false;
-    if (hi > 0.012f || lo < -0.012f)
+    if (max_abs > 0.012f)
         return false;
     if (peak_to_peak > 0.020f)
         return false;
-
     // Sharp single-bin spikes and a 0/360 step are signs of a noisy or
     // incomplete map rather than a smooth position-synchronous cogging curve.
     if (max_jump > 0.003f)
         return false;
     if (wrap_jump > 0.003f)
         return false;
-
     return true;
 }
 
@@ -99,6 +89,9 @@ void Controller::reset(bool abort_anticogging) {
         anticogging_rejected_reverse_samples_ = 0;
         anticogging_rejected_state_samples_ = 0;
         anticogging_rejected_saturation_samples_ = 0;
+        anticogging_stats_index_ = 0;
+        anticogging_calibration_failed_ = false;
+        anticogging_calibration_abort_reason_ = 0;
     }
     pos_setpoint_ = 0.0f;
     vel_setpoint_ = 0.0f;
@@ -243,7 +236,15 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
         anticogging_map_peak_to_peak_ = 0.0f;
         anticogging_map_max_jump_ = 0.0f;
         anticogging_map_wrap_jump_ = 0.0f;
-        anticogging_stats_computed_ = false;
+        anticogging_map_max_abs_ = 0.0f;
+        anticogging_map_min_ = 0.0f;
+        anticogging_map_max_ = 0.0f;
+        anticogging_map_sum_sq_ = 0.0f;
+        anticogging_map_first_ = 0.0f;
+        anticogging_map_last_ = 0.0f;
+        anticogging_stats_index_ = 0;
+        anticogging_calibration_failed_ = false;
+        anticogging_calibration_abort_reason_ = 0;
         // The ABZ workflow uses a slow, bidirectional velocity scan.  It
         // avoids 3600 discrete position jumps, which can trip overspeed on a
         // light rotor and also lets friction cancel when the two directions
@@ -286,7 +287,27 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
  * 
  * This holding current is added as a feedforward term in the control loop.
  */
+
+// Abort the calibration atomically: a half-finished map must never be applied.
+// reason: 0 = none, 1 = fault (motor/axis/controller/overspeed/deadline),
+// 2 = map quality gate failed.
+void Controller::abort_anticogging_calibration(uint8_t reason) {
+    config_.anticogging.calib_anticogging = false;
+    anticogging_valid_ = false;
+    config_.anticogging.pre_calibrated = false;
+    anticogging_torque_ = 0.0f;
+    anticogging_calibration_failed_ = true;
+    anticogging_calibration_abort_reason_ = reason;
+    anticogging_scan_phase_ = ANTICOGGING_SCAN_FAILED;
+    axis_->requested_state_ = Axis::AXIS_STATE_IDLE;
+}
+
 bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate) {
+    // Abort on any fault so a half-finished map is never applied.
+    if (axis_->error_ != Axis::ERROR_NONE) {
+        abort_anticogging_calibration(1);
+        return false;
+    }
     if (anticogging_velocity_only_) {
         constexpr float scan_speed = FOC_STUDIO_ABZ_SCAN_SPEED;
         constexpr float tolerance = FOC_STUDIO_ABZ_SCAN_VEL_TOLERANCE;
@@ -420,8 +441,8 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                     const float progress = std::clamp(
                             (pos_estimate - anticogging_scan_start_pos_) / scan_turns,
                             0.0f, 1.0f);
-                    anticogging_progress_percent_ = 50.0f * progress;
-                    config_.anticogging.index = static_cast<uint32_t>(progress * 1800.0f);
+                    anticogging_progress_percent_ = 45.0f * progress;
+                    config_.anticogging.index = static_cast<uint32_t>(progress * 1620.0f);
                 }
                 if (pos_estimate - anticogging_scan_start_pos_ >= scan_turns) {
                     input_vel_ = -scan_speed;
@@ -446,8 +467,8 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                     const float progress = std::clamp(
                             (anticogging_reverse_start_pos_ - pos_estimate) / scan_turns,
                             0.0f, 1.0f);
-                    anticogging_progress_percent_ = 50.0f + 50.0f * progress;
-                    config_.anticogging.index = 1800u + static_cast<uint32_t>(progress * 1800.0f);
+                    anticogging_progress_percent_ = 45.0f + 45.0f * progress;
+                    config_.anticogging.index = 1620u + static_cast<uint32_t>(progress * 1620.0f);
                 }
                 if (anticogging_reverse_start_pos_ - pos_estimate >= scan_turns) {
                     input_vel_ = 0.0f;
@@ -473,7 +494,9 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                     anticogging_forward_map_[index] = static_cast<int16_t>(std::lrintf(
                             config_.anticogging.cogging_map[index] * torque_scale));
                 }
-                config_.anticogging.index = 3600;
+                config_.anticogging.index = 3240;
+                anticogging_progress_percent_ = 90.0f + 3.0f *
+                        ((float)anticogging_finalize_index_ / 3600.0f);
                 if (anticogging_finalize_index_ >= 3600) {
                     anticogging_finalize_index_ = 0;
                     anticogging_map_sum_ = 0.0f;
@@ -483,8 +506,8 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
             }
             case ANTICOGGING_SCAN_SMOOTH: {
                 input_vel_ = 0.0f;
-                constexpr uint16_t bins_per_cycle = 2;
-                for (uint16_t n = 0; n < bins_per_cycle && anticogging_finalize_index_ < 3600; ++n) {
+                for (uint16_t n = 0; n < ANTICOGGING_POSTPROCESS_BINS_PER_CYCLE &&
+                        anticogging_finalize_index_ < 3600; ++n) {
                     const uint16_t index = anticogging_finalize_index_++;
                     const uint16_t im2 = (index + 3598) % 3600;
                     const uint16_t im1 = (index + 3599) % 3600;
@@ -502,44 +525,82 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                     anticogging_map_sum_ += smoothed;
                 }
                 config_.anticogging.index = 3600;
-                if (anticogging_finalize_index_ >= 3600 && !anticogging_stats_computed_) {
+                anticogging_progress_percent_ = 93.0f + 3.0f *
+                        ((float)anticogging_finalize_index_ / 3600.0f);
+                if (anticogging_finalize_index_ >= 3600) {
                     anticogging_map_mean_ = anticogging_map_sum_ / 3600.0f;
-                    const float* map = config_.anticogging.cogging_map;
-                    float lo = 1e9f, hi = -1e9f, sum_sq = 0.0f;
-                    float prev = map[3599];
-                    float max_jump = 0.0f;
-                    for (uint32_t i = 0; i < 3600; ++i) {
-                        const float v = map[i];
-                        lo = std::min(lo, v);
-                        hi = std::max(hi, v);
-                        sum_sq += v * v;
-                        max_jump = std::max(max_jump, std::abs(v - prev));
-                        prev = v;
-                    }
-                    anticogging_map_rms_ = std::sqrt(sum_sq / 3600.0f);
-                    anticogging_map_peak_to_peak_ = hi - lo;
-                    anticogging_map_max_jump_ = max_jump;
-                    anticogging_map_wrap_jump_ = std::abs(map[3599] - map[0]);
-                    anticogging_stats_computed_ = true;
-                }
-                if (anticogging_finalize_index_ >= 3600 && std::abs(vel_estimate) <= 0.05f) {
-                    config_.anticogging.index = 0;
-                    config_.anticogging.calib_anticogging = false;
-                    anticogging_progress_percent_ = 100.0f;
-                    // Reject a map that is under-covered, flat, spiky, or
-                    // discontinuous at the wrap point.
-                    anticogging_valid_ = anticogging_valid_bin_count_ >= 2880 &&
-                            anticogging_map_quality_ok(
-                                    config_.anticogging.cogging_map,
-                                    anticogging_valid_bin_count_, 3600);
-                    config_.anticogging.pre_calibrated = anticogging_valid_;
-                    anticogging_scan_phase_ = ANTICOGGING_SCAN_IDLE;
-                    axis_->requested_state_ = Axis::AXIS_STATE_IDLE;
-                    return true;
+                    anticogging_stats_index_ = 0;
+                    anticogging_map_sum_sq_ = 0.0f;
+                    anticogging_map_min_ = 1e9f;
+                    anticogging_map_max_ = -1e9f;
+                    anticogging_map_max_jump_ = 0.0f;
+                    anticogging_map_first_ = config_.anticogging.cogging_map[0];
+                    anticogging_map_last_ = config_.anticogging.cogging_map[3599];
+                    anticogging_scan_phase_ = ANTICOGGING_SCAN_STATS;
                 }
                 break;
             }
+            case ANTICOGGING_SCAN_STATS: {
+                input_vel_ = 0.0f;
+                // Incremental statistics: only a few bins per control cycle so
+                // the 8 kHz PWM deadline is never missed.
+                const float* map = config_.anticogging.cogging_map;
+                for (uint16_t n = 0; n < ANTICOGGING_POSTPROCESS_BINS_PER_CYCLE &&
+                        anticogging_stats_index_ < 3600; ++n) {
+                    const uint16_t i = anticogging_stats_index_++;
+                    const float v = map[i];
+                    anticogging_map_sum_sq_ += v * v;
+                    anticogging_map_min_ = std::min(anticogging_map_min_, v);
+                    anticogging_map_max_ = std::max(anticogging_map_max_, v);
+                    if (i > 0) {
+                        anticogging_map_max_jump_ = std::max(
+                                anticogging_map_max_jump_, std::abs(v - map[i - 1]));
+                    }
+                }
+                anticogging_progress_percent_ = 96.0f + 3.0f *
+                        ((float)anticogging_stats_index_ / 3600.0f);
+                if (anticogging_stats_index_ >= 3600) {
+                    anticogging_map_rms_ = std::sqrt(anticogging_map_sum_sq_ / 3600.0f);
+                    anticogging_map_peak_to_peak_ =
+                            anticogging_map_max_ - anticogging_map_min_;
+                    anticogging_map_max_abs_ = std::max(
+                            std::abs(anticogging_map_min_), std::abs(anticogging_map_max_));
+                    anticogging_map_wrap_jump_ = std::abs(
+                            anticogging_map_last_ - anticogging_map_first_);
+                    anticogging_scan_phase_ = ANTICOGGING_SCAN_VALIDATE;
+                }
+                break;
+            }
+            case ANTICOGGING_SCAN_VALIDATE: {
+                input_vel_ = 0.0f;
+                anticogging_progress_percent_ = 99.0f;
+                // O(1) quality gate from pre-computed statistics; no map walk.
+                const bool quality_ok = anticogging_map_quality_ok(
+                        anticogging_valid_bin_count_, 3600,
+                        anticogging_map_peak_to_peak_, anticogging_map_max_abs_,
+                        anticogging_map_max_jump_, anticogging_map_wrap_jump_);
+                if (quality_ok) {
+                    anticogging_valid_ = true;
+                    config_.anticogging.pre_calibrated = true;
+                    config_.anticogging.calib_anticogging = false;
+                    anticogging_calibration_failed_ = false;
+                    anticogging_scan_phase_ = ANTICOGGING_SCAN_COMPLETE;
+                } else {
+                    abort_anticogging_calibration(2);  // quality gate failed
+                }
+                break;
+            }
+            case ANTICOGGING_SCAN_COMPLETE: {
+                input_vel_ = 0.0f;
+                anticogging_progress_percent_ = 100.0f;
+                config_.anticogging.index = 0;
+                anticogging_scan_phase_ = ANTICOGGING_SCAN_IDLE;
+                axis_->requested_state_ = Axis::AXIS_STATE_IDLE;
+                return true;
+            }
+            case ANTICOGGING_SCAN_FAILED:
             default:
+                input_vel_ = 0.0f;
                 break;
         }
         return false;
@@ -633,11 +694,32 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                     static_cast<float>(weighted) / (9.0f * torque_scale),
                     -0.012f, 0.012f);
         }
-        // Quality gate: only publish a map that is covered, has structure, and
-        // is smooth and continuous.
+        // Compute map statistics for the quality gate (the FOC Studio velocity
+        // scan uses the incremental STATS phase; this CAN position-hold path
+        // walks the map once here).
+        {
+            const float* map = config_.anticogging.cogging_map;
+            float lo = 1e9f, hi = -1e9f, sum_sq = 0.0f;
+            float prev = map[3599];
+            float max_jump = 0.0f;
+            for (uint32_t i = 0; i < 3600; ++i) {
+                const float v = map[i];
+                lo = std::min(lo, v);
+                hi = std::max(hi, v);
+                sum_sq += v * v;
+                max_jump = std::max(max_jump, std::abs(v - prev));
+                prev = v;
+            }
+            anticogging_map_rms_ = std::sqrt(sum_sq / 3600.0f);
+            anticogging_map_peak_to_peak_ = hi - lo;
+            anticogging_map_max_abs_ = std::max(std::abs(lo), std::abs(hi));
+            anticogging_map_max_jump_ = max_jump;
+            anticogging_map_wrap_jump_ = std::abs(map[3599] - map[0]);
+        }
         anticogging_valid_ = anticogging_map_quality_ok(
-                config_.anticogging.cogging_map,
-                anticogging_valid_bin_count_, ANTICOGGING_POSITION_SCAN_POINTS);
+                anticogging_valid_bin_count_, ANTICOGGING_POSITION_SCAN_POINTS,
+                anticogging_map_peak_to_peak_, anticogging_map_max_abs_,
+                anticogging_map_max_jump_, anticogging_map_wrap_jump_);
         config_.anticogging.pre_calibrated = anticogging_valid_;
         config_.anticogging.calib_anticogging = false;
         return true;

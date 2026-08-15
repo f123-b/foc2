@@ -78,6 +78,13 @@ const state = {
   anticoggingCalibrationActive: false,
   anticoggingIndex: 0,
   anticoggingCoverage: 0,
+  anticoggingCalibrationFailed: false,
+  anticoggingCalibrationAbortReason: 0,
+  anticoggingMapMean: 0,
+  anticoggingMapRms: 0,
+  anticoggingMapPeakToPeak: 0,
+  anticoggingMapMaxJump: 0,
+  anticoggingMapWrapJump: 0,
   direction: 0,
   fetThermistorError: 0,
   motorThermistorError: 0,
@@ -840,21 +847,29 @@ function updateCalibrationState() {
   const standardActive = [3, 4, 6, 7, 10].includes(state.stateCode);
   const coggingActive = state.anticoggingCalibrationActive;
   const active = standardActive || coggingActive;
-  const coggingPercent = Math.min(100, Math.max(0, state.anticoggingIndex / 36));
+  const coggingFailed = Boolean(state.anticoggingCalibrationFailed);
+  const coggingPercent = Math.min(100, Math.max(0,
+    Number(state.anticoggingProgressPercent) > 0
+      ? state.anticoggingProgressPercent
+      : state.anticoggingIndex / 36));
   dom.stepSafety.textContent = state.transport === 'disconnected' ? '待连接' : '已连接';
   dom.stepSafety.className = `step-state ${state.transport === 'disconnected' ? '' : 'done'}`;
   dom.stepMode.textContent = modeLabel(state.mode);
-  dom.stepCalibration.textContent = coggingActive
-    ? `齿槽标定中 ${coggingPercent.toFixed(1)}%`
-    : standardActive ? '进行中'
-      : state.anticoggingValid ? '齿槽补偿已就绪'
-        : state.stateCode === 1 && dom.stepCalibration.textContent === '进行中' ? '已完成' : dom.stepCalibration.textContent;
-  dom.calibrationStatus.textContent = coggingActive
-    ? `ABZ 齿槽标定 ${coggingPercent.toFixed(1)}%`
-    : active ? '校准进行中' : (state.stateCode === 1 ? '设备空闲' : state.axisState);
+  dom.stepCalibration.textContent = coggingFailed
+    ? '标定失败'
+    : coggingActive
+      ? `齿槽标定中 ${coggingPercent.toFixed(1)}%`
+      : standardActive ? '进行中'
+        : state.anticoggingValid ? '齿槽补偿已就绪'
+          : state.stateCode === 1 && dom.stepCalibration.textContent === '进行中' ? '已完成' : dom.stepCalibration.textContent;
+  dom.calibrationStatus.textContent = coggingFailed
+    ? '标定失败'
+    : coggingActive
+      ? `ABZ 齿槽标定 ${coggingPercent.toFixed(1)}%`
+      : active ? '校准进行中' : (state.stateCode === 1 ? '设备空闲' : state.axisState);
   const readiness = `电机校准：${state.motorCalibrated ? '完成' : '未完成'} · 编码器：${state.encoderReady ? '就绪' : '未就绪'} · 方向：${state.direction || '未确定'}`;
   const coverage = Math.min(3600, Math.max(0, state.anticoggingCoverage || 0));
-  const cogging = `齿槽补偿：${coggingActive ? `${coggingPercent.toFixed(1)}%` : state.anticoggingValid ? `本次上电已就绪 · 有效覆盖 ${coverage}/3600` : `未标定 · 有效覆盖 ${coverage}/3600`}`;
+  const cogging = `齿槽补偿：${coggingFailed ? '标定失败' : coggingActive ? `${coggingPercent.toFixed(1)}%` : state.anticoggingValid ? `本次上电已就绪 · 有效覆盖 ${coverage}/3600` : `未标定 · 有效覆盖 ${coverage}/3600`}`;
   dom.calibrationOutput.textContent = `${new Date().toLocaleTimeString()}  状态：${state.axisState}\n反馈：${modeLabel(state.mode)}\n${readiness}\n${cogging}\n${hasFault(state) ? currentFaultText(state) : '无故障'}`;
   dom.coggingCalibrationButton.disabled = state.transport === 'disconnected' ||
     state.mode !== MODE.ABZ || state.stateCode !== 1 || !state.motorCalibrated ||

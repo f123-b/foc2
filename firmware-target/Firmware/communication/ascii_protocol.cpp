@@ -478,7 +478,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float iq_setpoint = power_stage_active ? current_control.Iq_setpoint : 0.0f;
             const float id_setpoint = power_stage_active ? current_control.Id_setpoint : 0.0f;
             axis->watchdog_feed();
-            respond(response_channel, use_checksum, "@ %u %lu %.6g %.6g %.6g %.6g %.6g %u %.6g %u %lu %lu %lu %lu %u %u %u %ld %lu %lu %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %lu %u %.6g %.6g %.6g %.6g %.6g %lu %lu %lu %lu %lu %lu",
+            respond(response_channel, use_checksum, "@ %u %lu %.6g %.6g %.6g %.6g %.6g %u %.6g %u %lu %lu %lu %lu %u %u %u %ld %lu %lu %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %lu %u %.6g %.6g %.6g %.6g %.6g %lu %lu %lu %lu %lu %lu %.6g %u %u %u %u",
                     (unsigned)axis->current_state_, (unsigned long)axis->error_,
                     (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
@@ -513,7 +513,12 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (unsigned long)axis->controller_.anticogging_rejected_velocity_samples_,
                     (unsigned long)axis->controller_.anticogging_rejected_reverse_samples_,
                     (unsigned long)axis->controller_.anticogging_rejected_state_samples_,
-                    (unsigned long)axis->controller_.anticogging_rejected_saturation_samples_);
+                    (unsigned long)axis->controller_.anticogging_rejected_saturation_samples_,
+                    (double)axis->controller_.anticogging_map_max_abs_,
+                    (unsigned)axis->controller_.anticogging_calibration_failed_,
+                    (unsigned)axis->controller_.anticogging_calibration_abort_reason_,
+                    (unsigned)axis->controller_.anticogging_stats_index_,
+                    (unsigned)axis->controller_.anticogging_finalize_index_);
         }
 
     } else if (cmd[0] == 'x') { // FOC Studio immediate stop
