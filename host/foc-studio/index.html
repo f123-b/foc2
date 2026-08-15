@@ -120,6 +120,7 @@
             <button id="scopePresetVelocityButton" class="button secondary">速度环预设</button>
             <button id="scopePresetCurrentButton" class="button secondary">电流环预设</button>
             <button id="scopePresetLowSpeedButton" class="button secondary">低速诊断预设</button>
+            <button id="scopePresetCoggingButton" class="button secondary">齿槽标定诊断</button>
             <label class="scope-window-label">时间窗口<select id="scopeWindowSelect"><option value="5">5 s</option><option value="10">10 s</option><option value="20" selected>20 s</option><option value="60">60 s</option></select></label>
             <span class="scope-toolbar-status"><i id="scopeRunIndicator"></i><span id="scopeCaptureState">正在采集</span><b id="scopeSampleRate">0 Hz</b></span>
           </div>
@@ -152,6 +153,8 @@
                 <div class="scope-channel-row"><input type="checkbox" data-scope-key="frictionAssistBlend" aria-label="显示破槽混合比"><i style="--channel:#a3e635"></i><span><b>破槽混合比</b><small>0..1</small></span><output data-scope-value="frictionAssistBlend">0.0000</output><span class="scope-channel-unit"></span></div>
                 <div class="scope-channel-row"><input type="checkbox" data-scope-key="frictionForwardVelocity" aria-label="显示摩擦前向速度"><i style="--channel:#2dd4bf"></i><span><b>摩擦前向速度</b><small>turn/s</small></span><output data-scope-value="frictionForwardVelocity">0.0000</output><span class="scope-channel-unit">turn/s</span></div>
                 <div class="scope-channel-row"><input type="checkbox" data-scope-key="frictionReverseDetected" aria-label="显示摩擦反向检测"><i style="--channel:#fb7185"></i><span><b>摩擦反向检测</b><small>bool</small></span><output data-scope-value="frictionReverseDetected">0</output><span class="scope-channel-unit"></span></div>
+                <div class="scope-channel-row"><input type="checkbox" data-scope-key="anticoggingCalibrationPhase" aria-label="显示齿槽标定相位"><i style="--channel:#c084fc"></i><span><b>齿槽标定相位</b><small>0..6</small></span><output data-scope-value="anticoggingCalibrationPhase">0</output><span class="scope-channel-unit"></span></div>
+                <div class="scope-channel-row"><input type="checkbox" data-scope-key="anticoggingProgressPercent" aria-label="显示齿槽标定进度"><i style="--channel:#38bdf8"></i><span><b>齿槽标定进度</b><small>%</small></span><output data-scope-value="anticoggingProgressPercent">0</output><span class="scope-channel-unit">%</span></div>
                 <div class="scope-channel-row"><input type="checkbox" data-scope-key="velocityProportionalTorque" aria-label="显示速度 P 转矩"><i style="--channel:#9354c7"></i><span><b>速度 P 转矩</b><small>Nm</small></span><output data-scope-value="velocityProportionalTorque">0.0000</output><span class="scope-channel-unit">Nm</span></div>
                 <div class="scope-channel-row"><input type="checkbox" data-scope-key="anticoggingTorque" aria-label="显示齿槽补偿转矩"><i style="--channel:#0f9f6e"></i><span><b>齿槽补偿转矩</b><small>Nm</small></span><output data-scope-value="anticoggingTorque">0.0000</output><span class="scope-channel-unit">Nm</span></div>
                 <div class="scope-channel-row"><input type="checkbox" data-scope-key="finalTorque" aria-label="显示最终转矩"><i style="--channel:#444ce7"></i><span><b>最终转矩</b><small>Nm</small></span><output data-scope-value="finalTorque">0.0000</output><span class="scope-channel-unit">Nm</span></div>

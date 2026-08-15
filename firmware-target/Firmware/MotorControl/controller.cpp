@@ -2,18 +2,20 @@
 #include "odrive_main.h"
 #include <algorithm>
 
-// The cogging-map scan runs at 2 turn/s. The scan integrator is allowed to
-// track the friction so the rotor actually reaches the scan speed, and the
-// gate is wide enough to keep sampling through the cogging ripple.
+// The cogging-map scan runs at 2 turn/s, where the ABZ velocity loop has been
+// verified to rotate continuously. Sampling is only allowed when the control
+// velocity is within a tight tolerance of the requested scan velocity and the
+// mechanical state is clean (no breakaway/recovery/reverse/saturation).
 static constexpr float FOC_STUDIO_ABZ_SCAN_SPEED = 2.0f;       // turn/s
 static constexpr float FOC_STUDIO_ABZ_SCAN_RAMP_RATE = 2.0f;  // turn/s^2
-// The bidirectional scan records the bounded P torque as the cogging map.
-// The normal low-speed gain keeps the P term deliberately quiet, which also
-// attenuates the recorded torque by the same factor and yields a nearly flat,
-// ineffective map. During the scan the count stream is dense enough to
-// tolerate a higher gain so the P term rejects the cogging and the sampled
-// torque reflects the real position-synchronous disturbance.
-static constexpr float FOC_STUDIO_ABZ_SCAN_VEL_GAIN = 0.003f;  // Nm/(turn/s)
+// Tight velocity gate: a 0 turn/s sample must not pass. The scan velocity is
+// held within +/-0.5 turn/s of the request before any sample is accepted.
+static constexpr float FOC_STUDIO_ABZ_SCAN_VEL_TOLERANCE = 0.5f;   // turn/s
+// Dwell at the requested velocity before sampling starts, so ramp/acceleration
+// torque is not written into the map.
+static constexpr float FOC_STUDIO_ABZ_SCAN_DWELL_TIME = 0.15f;     // s
+// Full mechanical turns scanned per direction.
+static constexpr float FOC_STUDIO_ABZ_SCAN_TURNS = 6.0f;           // turns
 
 // The position-hold cogging scan steps over the map at a coarse resolution so
 // each step is large enough for the low-speed breakaway to move the rotor (the
@@ -91,6 +93,12 @@ void Controller::reset(bool abort_anticogging) {
         anticogging_valid_bin_count_ = 0;
         anticogging_sample_position_valid_ = false;
         anticogging_scan_phase_ = ANTICOGGING_SCAN_IDLE;
+        anticogging_dwell_time_ = 0.0f;
+        anticogging_progress_percent_ = 0.0f;
+        anticogging_rejected_velocity_samples_ = 0;
+        anticogging_rejected_reverse_samples_ = 0;
+        anticogging_rejected_state_samples_ = 0;
+        anticogging_rejected_saturation_samples_ = 0;
     }
     pos_setpoint_ = 0.0f;
     vel_setpoint_ = 0.0f;
@@ -220,6 +228,22 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
         anticogging_map_mean_ = 0.0f;
         anticogging_valid_bin_count_ = 0;
         anticogging_sample_position_valid_ = false;
+        anticogging_dwell_time_ = 0.0f;
+        anticogging_progress_percent_ = 0.0f;
+        anticogging_scan_velocity_ = 0.0f;
+        anticogging_scan_velocity_error_ = 0.0f;
+        anticogging_current_bin_ = 0;
+        anticogging_forward_valid_bins_ = 0;
+        anticogging_reverse_valid_bins_ = 0;
+        anticogging_rejected_velocity_samples_ = 0;
+        anticogging_rejected_reverse_samples_ = 0;
+        anticogging_rejected_state_samples_ = 0;
+        anticogging_rejected_saturation_samples_ = 0;
+        anticogging_map_rms_ = 0.0f;
+        anticogging_map_peak_to_peak_ = 0.0f;
+        anticogging_map_max_jump_ = 0.0f;
+        anticogging_map_wrap_jump_ = 0.0f;
+        anticogging_stats_computed_ = false;
         // The ABZ workflow uses a slow, bidirectional velocity scan.  It
         // avoids 3600 discrete position jumps, which can trip overspeed on a
         // light rotor and also lets friction cancel when the two directions
@@ -265,15 +289,48 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
 bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate) {
     if (anticogging_velocity_only_) {
         constexpr float scan_speed = FOC_STUDIO_ABZ_SCAN_SPEED;
-        // The ABZ count-window contains position-synchronous ripple at the
-        // scan speed. The velocity loop is deliberately weak at low speed, so
-        // the cogging causes a velocity ripple of one to two turn/s; a gate too
-        // tight to that ripple skips exactly the high-cogging positions and
-        // yields a flat, useless map. Keep the gate wide; the overspeed guard
-        // remains independent and decides whether a bin is usable.
-        constexpr float scan_tolerance = 2.0f;
-        constexpr float scan_turns = 6.0f;
+        constexpr float tolerance = FOC_STUDIO_ABZ_SCAN_VEL_TOLERANCE;
+        constexpr float dwell_time = FOC_STUDIO_ABZ_SCAN_DWELL_TIME;
+        constexpr float scan_turns = FOC_STUDIO_ABZ_SCAN_TURNS;
         constexpr float torque_scale = 1000000.0f;
+
+        // Telemetry: control velocity and its error vs the requested scan
+        // velocity.
+        anticogging_scan_velocity_ = vel_estimate;
+        const bool reverse_phase =
+                anticogging_scan_phase_ == ANTICOGGING_SCAN_RAMP_REVERSE ||
+                anticogging_scan_phase_ == ANTICOGGING_SCAN_REVERSE;
+        const float requested = reverse_phase ? -scan_speed : scan_speed;
+        anticogging_scan_velocity_error_ = vel_estimate - requested;
+
+        // A sample is valid only when the mechanical state is clean: velocity
+        // within the tight tolerance in the scan direction, friction RUNNING,
+        // no reverse motion, and no torque saturation. Transient torque from
+        // breakaway/recovery/saturation must not enter the cogging map.
+        const auto sample_valid = [&](bool reverse) -> bool {
+            const bool velocity_ok = reverse
+                    ? (vel_estimate < 0.0f &&
+                            std::abs(vel_estimate + scan_speed) <= tolerance)
+                    : (vel_estimate > 0.0f &&
+                            std::abs(vel_estimate - scan_speed) <= tolerance);
+            if (!velocity_ok) {
+                ++anticogging_rejected_velocity_samples_;
+                return false;
+            }
+            if (friction_reverse_detected_) {
+                ++anticogging_rejected_reverse_samples_;
+                return false;
+            }
+            if (low_speed_compensator_state_ != FrictionCompensator::STATE_RUNNING) {
+                ++anticogging_rejected_state_samples_;
+                return false;
+            }
+            if (abz_velocity_torque_saturated_ || motor_torque_saturated_) {
+                ++anticogging_rejected_saturation_samples_;
+                return false;
+            }
+            return true;
+        };
 
         const auto sample_map = [&](bool reverse) {
             // Sample once on entry to each unwrapped map bin. This retains the
@@ -293,16 +350,18 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
             if (wrapped_bin < 0)
                 wrapped_bin += 3600;
             const uint32_t index = static_cast<uint32_t>(wrapped_bin);
-            // Record the complete non-map torque used by the scan. The
-            // low-speed helper contains the actual breakaway torque needed by
-            // this motor; omitting it makes the resulting map nearly flat.
-            // Averaging forward and reverse passes cancels the direction-only
-            // static friction and keeps the position-synchronous cogging term.
+            // Record the complete non-anticogging torque that maintains the
+            // constant scan speed (P + I + friction FF). The anticogging FF is
+            // forced to zero during calibration, so this is the true total
+            // mechanical torque. Averaging forward and reverse cancels the
+            // direction-only Coulomb friction.
             const float sample = std::clamp(
                     velocity_loop_torque_ + low_speed_friction_torque_,
                     -0.012f, 0.012f);
             if (!reverse) {
                 uint8_t& count = anticogging_forward_count_[index];
+                if (count == 0)
+                    ++anticogging_forward_valid_bins_;
                 const int32_t old_mean = anticogging_forward_map_[index];
                 const int32_t value = static_cast<int32_t>(std::lrintf(sample * torque_scale));
                 const uint32_t next_count = std::min<uint32_t>(255, static_cast<uint32_t>(count) + 1);
@@ -310,6 +369,8 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                 count = static_cast<uint8_t>(next_count);
             } else {
                 uint8_t& count = anticogging_reverse_count_[index];
+                if (count == 0)
+                    ++anticogging_reverse_valid_bins_;
                 const uint32_t next_count = std::min<uint32_t>(255, static_cast<uint32_t>(count) + 1);
                 if (count == 0) {
                     config_.anticogging.cogging_map[index] = sample;
@@ -320,42 +381,74 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                 count = static_cast<uint8_t>(next_count);
             }
         };
+
+        // Dwell: only leave the ramp phase once the velocity has stayed in
+        // range for dwell_time, so ramp/acceleration torque is not recorded.
+        const auto dwell_ok = [&](bool reverse) -> bool {
+            const bool velocity_ok = reverse
+                    ? (vel_estimate < 0.0f &&
+                            std::abs(vel_estimate + scan_speed) <= tolerance)
+                    : (vel_estimate > 0.0f &&
+                            std::abs(vel_estimate - scan_speed) <= tolerance);
+            anticogging_dwell_time_ = velocity_ok
+                    ? anticogging_dwell_time_ + current_meas_period
+                    : 0.0f;
+            return anticogging_dwell_time_ >= dwell_time;
+        };
+
+        // Current mechanical bin for telemetry.
+        int32_t current_bin = static_cast<int32_t>(pos_estimate * 3600.0f);
+        current_bin = ((current_bin % 3600) + 3600) % 3600;
+        anticogging_current_bin_ = static_cast<uint32_t>(current_bin);
+
         switch (anticogging_scan_phase_) {
             case ANTICOGGING_SCAN_RAMP_FORWARD:
                 input_vel_ = scan_speed;
-                if (vel_setpoint_ >= scan_speed - 0.01f &&
-                        std::abs(vel_estimate) >= 0.15f &&
-                        std::abs(vel_estimate - scan_speed) <= scan_tolerance) {
+                anticogging_progress_percent_ = 0.0f;
+                if (vel_setpoint_ >= scan_speed - 0.01f && dwell_ok(false)) {
                     anticogging_scan_start_pos_ = pos_estimate;
                     anticogging_sample_position_valid_ = false;
+                    anticogging_dwell_time_ = 0.0f;
                     anticogging_scan_phase_ = ANTICOGGING_SCAN_FORWARD;
                 }
                 break;
             case ANTICOGGING_SCAN_FORWARD:
                 input_vel_ = scan_speed;
-                if (std::abs(vel_estimate - scan_speed) <= scan_tolerance) sample_map(false);
-                config_.anticogging.index = static_cast<uint32_t>(std::clamp(
-                        (pos_estimate - anticogging_scan_start_pos_) / scan_turns, 0.0f, 1.0f) * 1800.0f);
+                if (sample_valid(false))
+                    sample_map(false);
+                {
+                    const float progress = std::clamp(
+                            (pos_estimate - anticogging_scan_start_pos_) / scan_turns,
+                            0.0f, 1.0f);
+                    anticogging_progress_percent_ = 50.0f * progress;
+                    config_.anticogging.index = static_cast<uint32_t>(progress * 1800.0f);
+                }
                 if (pos_estimate - anticogging_scan_start_pos_ >= scan_turns) {
                     input_vel_ = -scan_speed;
+                    anticogging_dwell_time_ = 0.0f;
                     anticogging_scan_phase_ = ANTICOGGING_SCAN_RAMP_REVERSE;
                 }
                 break;
             case ANTICOGGING_SCAN_RAMP_REVERSE:
                 input_vel_ = -scan_speed;
-                if (vel_setpoint_ <= -scan_speed + 0.01f &&
-                        std::abs(vel_estimate) >= 0.15f &&
-                        std::abs(vel_estimate + scan_speed) <= scan_tolerance) {
+                if (vel_setpoint_ <= -scan_speed + 0.01f && dwell_ok(true)) {
                     anticogging_reverse_start_pos_ = pos_estimate;
                     anticogging_sample_position_valid_ = false;
+                    anticogging_dwell_time_ = 0.0f;
                     anticogging_scan_phase_ = ANTICOGGING_SCAN_REVERSE;
                 }
                 break;
             case ANTICOGGING_SCAN_REVERSE:
                 input_vel_ = -scan_speed;
-                if (std::abs(vel_estimate + scan_speed) <= scan_tolerance) sample_map(true);
-                config_.anticogging.index = 1800u + static_cast<uint32_t>(std::clamp(
-                        (anticogging_reverse_start_pos_ - pos_estimate) / scan_turns, 0.0f, 1.0f) * 1800.0f);
+                if (sample_valid(true))
+                    sample_map(true);
+                {
+                    const float progress = std::clamp(
+                            (anticogging_reverse_start_pos_ - pos_estimate) / scan_turns,
+                            0.0f, 1.0f);
+                    anticogging_progress_percent_ = 50.0f + 50.0f * progress;
+                    config_.anticogging.index = 1800u + static_cast<uint32_t>(progress * 1800.0f);
+                }
                 if (anticogging_reverse_start_pos_ - pos_estimate >= scan_turns) {
                     input_vel_ = 0.0f;
                     anticogging_finalize_index_ = 0;
@@ -409,16 +502,32 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                     anticogging_map_sum_ += smoothed;
                 }
                 config_.anticogging.index = 3600;
-                if (anticogging_finalize_index_ >= 3600) {
+                if (anticogging_finalize_index_ >= 3600 && !anticogging_stats_computed_) {
                     anticogging_map_mean_ = anticogging_map_sum_ / 3600.0f;
+                    const float* map = config_.anticogging.cogging_map;
+                    float lo = 1e9f, hi = -1e9f, sum_sq = 0.0f;
+                    float prev = map[3599];
+                    float max_jump = 0.0f;
+                    for (uint32_t i = 0; i < 3600; ++i) {
+                        const float v = map[i];
+                        lo = std::min(lo, v);
+                        hi = std::max(hi, v);
+                        sum_sq += v * v;
+                        max_jump = std::max(max_jump, std::abs(v - prev));
+                        prev = v;
+                    }
+                    anticogging_map_rms_ = std::sqrt(sum_sq / 3600.0f);
+                    anticogging_map_peak_to_peak_ = hi - lo;
+                    anticogging_map_max_jump_ = max_jump;
+                    anticogging_map_wrap_jump_ = std::abs(map[3599] - map[0]);
+                    anticogging_stats_computed_ = true;
                 }
                 if (anticogging_finalize_index_ >= 3600 && std::abs(vel_estimate) <= 0.05f) {
                     config_.anticogging.index = 0;
                     config_.anticogging.calib_anticogging = false;
-                    // Do not report a successful calibration if unstable scan
-                    // speed left most mechanical positions without a valid
-                    // sample in either direction, or if the finished map fails
-                    // the quality gate (coverage / amplitude / spikes / wrap).
+                    anticogging_progress_percent_ = 100.0f;
+                    // Reject a map that is under-covered, flat, spiky, or
+                    // discontinuous at the wrap point.
                     anticogging_valid_ = anticogging_valid_bin_count_ >= 2880 &&
                             anticogging_map_quality_ok(
                                     config_.anticogging.cogging_map,

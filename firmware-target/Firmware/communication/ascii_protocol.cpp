@@ -131,6 +131,21 @@ static void restore_foc_position_limits(Axis* axis) {
     limits.cogging_calibration = false;
 }
 
+static void apply_foc_position_limits(Axis* axis, float vel_limit, float torque_limit) {
+    FocPositionLimitState& limits = foc_position_limits[axis->axis_num_];
+    if (!limits.active) {
+        limits.vel_limit = axis->controller_.config_.vel_limit;
+        limits.torque_limit = axis->motor_.config_.torque_lim;
+        limits.pos_gain = axis->controller_.config_.pos_gain;
+        limits.vel_limit_tolerance = axis->controller_.config_.vel_limit_tolerance;
+        limits.active = true;
+    }
+    axis->controller_.config_.vel_limit = std::min(std::abs(vel_limit), limits.vel_limit);
+    axis->motor_.config_.torque_lim = std::min(std::abs(torque_limit), limits.torque_limit);
+    axis->controller_.config_.pos_gain = std::min(1.0f, limits.pos_gain);
+    axis->controller_.config_.vel_limit_tolerance = std::max(2.0f, limits.vel_limit_tolerance);
+}
+
 static void restore_completed_cogging_limits(Axis* axis) {
     FocPositionLimitState& limits = foc_position_limits[axis->axis_num_];
     if (limits.active && limits.cogging_calibration &&
@@ -379,7 +394,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float v_beta = power_stage_active ? current_control.final_v_beta : 0.0f;
             axis->watchdog_feed();
             respond(response_channel, use_checksum,
-                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u",
+                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %.6g %.6g %.6g",
                     (unsigned)axis->current_state_, (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
                     (double)v_alpha,
@@ -423,7 +438,11 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (double)axis->controller_.friction_no_progress_time_,
                     (double)axis->controller_.friction_recovery_timer_,
                     (double)axis->controller_.friction_forward_velocity_,
-                    (unsigned)axis->controller_.friction_reverse_detected_);
+                    (unsigned)axis->controller_.friction_reverse_detected_,
+                    (unsigned)axis->controller_.anticogging_scan_phase_,
+                    (double)axis->controller_.anticogging_progress_percent_,
+                    (double)axis->controller_.anticogging_scan_velocity_,
+                    (double)axis->controller_.anticogging_scan_velocity_error_);
         }
 
     } else if (cmd[0] == 'j') { // FOC Studio aggregate telemetry
@@ -459,7 +478,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float iq_setpoint = power_stage_active ? current_control.Iq_setpoint : 0.0f;
             const float id_setpoint = power_stage_active ? current_control.Id_setpoint : 0.0f;
             axis->watchdog_feed();
-            respond(response_channel, use_checksum, "@ %u %lu %.6g %.6g %.6g %.6g %.6g %u %.6g %u %lu %lu %lu %lu %u %u %u %ld %lu %lu %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %lu %u",
+            respond(response_channel, use_checksum, "@ %u %lu %.6g %.6g %.6g %.6g %.6g %u %.6g %u %lu %lu %lu %lu %u %u %u %ld %lu %lu %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %lu %u %.6g %.6g %.6g %.6g %.6g %lu %lu %lu %lu %lu %lu",
                     (unsigned)axis->current_state_, (unsigned long)axis->error_,
                     (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
@@ -483,7 +502,18 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (unsigned)axis->controller_.anticogging_valid_,
                     (unsigned)axis->controller_.config_.anticogging.calib_anticogging,
                     (unsigned long)axis->controller_.config_.anticogging.index,
-                    (unsigned)axis->controller_.anticogging_valid_bin_count_);
+                    (unsigned)axis->controller_.anticogging_valid_bin_count_,
+                    (double)axis->controller_.anticogging_map_mean_,
+                    (double)axis->controller_.anticogging_map_rms_,
+                    (double)axis->controller_.anticogging_map_peak_to_peak_,
+                    (double)axis->controller_.anticogging_map_max_jump_,
+                    (double)axis->controller_.anticogging_map_wrap_jump_,
+                    (unsigned long)axis->controller_.anticogging_forward_valid_bins_,
+                    (unsigned long)axis->controller_.anticogging_reverse_valid_bins_,
+                    (unsigned long)axis->controller_.anticogging_rejected_velocity_samples_,
+                    (unsigned long)axis->controller_.anticogging_rejected_reverse_samples_,
+                    (unsigned long)axis->controller_.anticogging_rejected_state_samples_,
+                    (unsigned long)axis->controller_.anticogging_rejected_saturation_samples_);
         }
 
     } else if (cmd[0] == 'x') { // FOC Studio immediate stop
@@ -546,10 +576,18 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     !axis->motor_.is_calibrated_ || !axis->encoder_.is_ready_) {
                 respond(response_channel, use_checksum, "err not-ready");
             } else {
-                // Anticogging calibration is temporarily disabled until the
-                // base ABZ velocity loop is stable. The position-hold scan can
-                // form a relay limit cycle and must not run in place.
-                respond(response_channel, use_checksum, "err cogging-experimental");
+                // Bidirectional constant-velocity scan at 2 turn/s. The base
+                // velocity loop is stable in that range, so the scan samples a
+                // clean position-synchronous torque.
+                restore_foc_velocity_tuning(axis);
+                restore_foc_torque_safety(axis);
+                set_foc_control_mode(axis, Controller::CONTROL_MODE_VELOCITY_CONTROL);
+                apply_foc_position_limits(axis, 3.0f, 0.015f);
+                foc_position_limits[axis->axis_num_].cogging_calibration = true;
+                axis->controller_.start_anticogging_calibration(true);
+                axis->requested_state_ = Axis::AXIS_STATE_CLOSED_LOOP_CONTROL;
+                axis->watchdog_feed();
+                respond(response_channel, use_checksum, "ok cogging-calibrating");
             }
         }
 

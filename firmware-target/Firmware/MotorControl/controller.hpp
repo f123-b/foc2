@@ -209,6 +209,24 @@ public:
     uint8_t anticogging_forward_count_[3600] = {};
     uint8_t anticogging_reverse_count_[3600] = {};
 
+    // Cogging calibration diagnostics.
+    float anticogging_dwell_time_ = 0.0f;
+    float anticogging_progress_percent_ = 0.0f;
+    float anticogging_scan_velocity_ = 0.0f;
+    float anticogging_scan_velocity_error_ = 0.0f;
+    uint32_t anticogging_current_bin_ = 0;
+    uint32_t anticogging_forward_valid_bins_ = 0;
+    uint32_t anticogging_reverse_valid_bins_ = 0;
+    uint32_t anticogging_rejected_velocity_samples_ = 0;
+    uint32_t anticogging_rejected_reverse_samples_ = 0;
+    uint32_t anticogging_rejected_state_samples_ = 0;
+    uint32_t anticogging_rejected_saturation_samples_ = 0;
+    float anticogging_map_rms_ = 0.0f;
+    float anticogging_map_peak_to_peak_ = 0.0f;
+    float anticogging_map_max_jump_ = 0.0f;
+    float anticogging_map_wrap_jump_ = 0.0f;
+    bool anticogging_stats_computed_ = false;
+
     // custom setters
     void set_input_pos(float value) { input_pos_ = value; input_pos_updated(); }
 

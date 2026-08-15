@@ -23,6 +23,11 @@ assert.deepEqual(parseTelemetry('@ 8 0 12.5 -1.25 3.5 12.2 35 1 -0.004 4'), {
   idMeasured: 0, iqSetpoint: 0, idSetpoint: 0,
   anticoggingValid: false, anticoggingCalibrationActive: false, anticoggingIndex: 0,
   anticoggingCoverage: 0,
+  anticoggingMapMean: 0, anticoggingMapRms: 0, anticoggingMapPeakToPeak: 0,
+  anticoggingMapMaxJump: 0, anticoggingMapWrapJump: 0,
+  anticoggingForwardValidBins: 0, anticoggingReverseValidBins: 0,
+  anticoggingRejectedVelocitySamples: 0, anticoggingRejectedReverseSamples: 0,
+  anticoggingRejectedStateSamples: 0, anticoggingRejectedSaturationSamples: 0,
 });
 const detailed = parseTelemetry('@ 1 320 0 0 3.5 12.2 35 0 0 0 8 128 32 0 0 0 1 -1 0 0');
 assert.equal(detailed.motorError, 8);
@@ -61,6 +66,8 @@ assert.deepEqual(parseFastTelemetry('! 8 1.25 -0.3 2.5 12.2 1 -0.2 -0.8 0.01 -0.
   frictionTargetTorque: 0, frictionSpeedRatio: 0, frictionAssistBlend: 0,
   frictionNoProgressTime: 0, frictionRecoveryTimer: 0,
   frictionForwardVelocity: 0, frictionReverseDetected: 0,
+  anticoggingCalibrationPhase: 0, anticoggingProgressPercent: 0,
+  anticoggingScanVelocity: 0, anticoggingScanVelocityError: 0,
 });
 const controlTelemetry = parseFastTelemetry('! 8 0.2 0.3 2.5 12.2 1 -0.2 -0.8 0.01 0.25 0 0.2 0.35 0.175 0.0015 0.003 2.55 0.05 2 0.0004 -0.0008 0.0041 0.0254');
 assert.equal(controlTelemetry.velocitySetpoint, 0.2);

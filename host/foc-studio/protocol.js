@@ -148,7 +148,13 @@ export function parseTelemetry(line) {
     phaseBVoltage = 0, phaseCVoltage = 0, idMeasured = 0,
     iqSetpoint = 0, idSetpoint = 0, anticoggingValid = 0,
     anticoggingCalibrationActive = 0, anticoggingIndex = 0,
-    anticoggingCoverage = 0] = values;
+    anticoggingCoverage = 0,
+    anticoggingMapMean = 0, anticoggingMapRms = 0,
+    anticoggingMapPeakToPeak = 0, anticoggingMapMaxJump = 0,
+    anticoggingMapWrapJump = 0,
+    anticoggingForwardValidBins = 0, anticoggingReverseValidBins = 0,
+    anticoggingRejectedVelocitySamples = 0, anticoggingRejectedReverseSamples = 0,
+    anticoggingRejectedStateSamples = 0, anticoggingRejectedSaturationSamples = 0] = values;
   return {
     axisState: AXIS_STATE[state] ?? `状态 ${state}`,
     stateCode: state,
@@ -183,6 +189,17 @@ export function parseTelemetry(line) {
     anticoggingCalibrationActive: Boolean(anticoggingCalibrationActive),
     anticoggingIndex,
     anticoggingCoverage,
+    anticoggingMapMean,
+    anticoggingMapRms,
+    anticoggingMapPeakToPeak,
+    anticoggingMapMaxJump,
+    anticoggingMapWrapJump,
+    anticoggingForwardValidBins,
+    anticoggingReverseValidBins,
+    anticoggingRejectedVelocitySamples,
+    anticoggingRejectedReverseSamples,
+    anticoggingRejectedStateSamples,
+    anticoggingRejectedSaturationSamples,
   };
 }
 
@@ -210,7 +227,9 @@ export function parseFastTelemetry(line) {
     enableLowSpeedCompensation = 0,
     frictionTargetTorque = 0, frictionSpeedRatio = 0, frictionAssistBlend = 0,
     frictionNoProgressTime = 0, frictionRecoveryTimer = 0,
-    frictionForwardVelocity = 0, frictionReverseDetected = 0] = values;
+    frictionForwardVelocity = 0, frictionReverseDetected = 0,
+    anticoggingCalibrationPhase = 0, anticoggingProgressPercent = 0,
+    anticoggingScanVelocity = 0, anticoggingScanVelocityError = 0] = values;
   return {
     axisState: AXIS_STATE[state] ?? `状态 ${state}`,
     stateCode: state,
@@ -263,6 +282,10 @@ export function parseFastTelemetry(line) {
     frictionRecoveryTimer,
     frictionForwardVelocity,
     frictionReverseDetected,
+    anticoggingCalibrationPhase,
+    anticoggingProgressPercent,
+    anticoggingScanVelocity,
+    anticoggingScanVelocityError,
   };
 }
 
