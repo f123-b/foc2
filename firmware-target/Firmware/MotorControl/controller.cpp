@@ -27,8 +27,8 @@ static constexpr uint32_t ANTICOGGING_POSITION_SCAN_POINTS =
 
 // Post-processing (finalize/smooth/stats) is spread over control cycles so a
 // single control tick never walks the full 3600-bin map and misses the PWM
-// deadline.
-static constexpr uint16_t ANTICOGGING_POSTPROCESS_BINS_PER_CYCLE = 4;
+// deadline. The bins-per-cycle count is runtime configurable and clamped to a
+// safe fixed set (1/2/4/8).
 
 // Validate a finished cogging map from pre-computed statistics (O(1), no map
 // walk). A map that is under-covered, flat, saturated, spiky, or discontinuous
@@ -309,10 +309,15 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
         return false;
     }
     if (anticogging_velocity_only_) {
-        constexpr float scan_speed = FOC_STUDIO_ABZ_SCAN_SPEED;
-        constexpr float tolerance = FOC_STUDIO_ABZ_SCAN_VEL_TOLERANCE;
-        constexpr float dwell_time = FOC_STUDIO_ABZ_SCAN_DWELL_TIME;
-        constexpr float scan_turns = FOC_STUDIO_ABZ_SCAN_TURNS;
+        const float scan_speed = config_.anticogging_scan_speed;
+        const float tolerance = config_.anticogging_scan_velocity_tolerance;
+        const float dwell_time = config_.anticogging_scan_dwell_time;
+        const float scan_turns = config_.anticogging_scan_turns;
+        // Clamp postprocess bins to a safe fixed set (1/2/4/8) so a bad runtime
+        // value cannot blow the control deadline.
+        const uint16_t postprocess_bins = config_.anticogging_postprocess_bins_per_cycle >= 8 ? 8 :
+                config_.anticogging_postprocess_bins_per_cycle >= 4 ? 4 :
+                config_.anticogging_postprocess_bins_per_cycle >= 2 ? 2 : 1;
         constexpr float torque_scale = 1000000.0f;
 
         // Telemetry: control velocity and its error vs the requested scan
@@ -480,8 +485,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                 input_vel_ = 0.0f;
                 // Spread the 3600-bin finalize work over control cycles so a
                 // single pass cannot starve PWM generation.
-                constexpr uint16_t bins_per_cycle = 2;
-                for (uint16_t n = 0; n < bins_per_cycle && anticogging_finalize_index_ < 3600; ++n) {
+                for (uint16_t n = 0; n < postprocess_bins && anticogging_finalize_index_ < 3600; ++n) {
                     const uint16_t index = anticogging_finalize_index_++;
                     if (anticogging_forward_count_[index] && anticogging_reverse_count_[index]) {
                         const float forward = static_cast<float>(anticogging_forward_map_[index]) / torque_scale;
@@ -506,7 +510,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
             }
             case ANTICOGGING_SCAN_SMOOTH: {
                 input_vel_ = 0.0f;
-                for (uint16_t n = 0; n < ANTICOGGING_POSTPROCESS_BINS_PER_CYCLE &&
+                for (uint16_t n = 0; n < postprocess_bins &&
                         anticogging_finalize_index_ < 3600; ++n) {
                     const uint16_t index = anticogging_finalize_index_++;
                     const uint16_t im2 = (index + 3598) % 3600;
@@ -545,7 +549,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                 // Incremental statistics: only a few bins per control cycle so
                 // the 8 kHz PWM deadline is never missed.
                 const float* map = config_.anticogging.cogging_map;
-                for (uint16_t n = 0; n < ANTICOGGING_POSTPROCESS_BINS_PER_CYCLE &&
+                for (uint16_t n = 0; n < postprocess_bins &&
                         anticogging_stats_index_ < 3600; ++n) {
                     const uint16_t i = anticogging_stats_index_++;
                     const float v = map[i];
@@ -939,8 +943,8 @@ bool Controller::update(float* torque_setpoint_output) {
     // ABZ uses its own PI gains: the generic ODrive defaults are far too large
     // for a 4000 CPR incremental encoder, so keep them tunable and independent.
     if (cascaded_abz_mode) {
-        vel_gain = config_.abz_vel_gain;
-        vel_integrator_gain = config_.abz_vel_integrator_gain;
+        vel_gain = std::max(0.0f, config_.abz_vel_gain);
+        vel_integrator_gain = std::max(0.0f, config_.abz_vel_integrator_gain);
     }
 
     // Low-bandwidth control velocity observer. It tracks the raw ABZ count
@@ -1001,17 +1005,21 @@ bool Controller::update(float* torque_setpoint_output) {
             anticogging_scale = 0.0f;
         }
         if (anticogging_scale > 0.0f) {
-            const float map_position = fmodf_pos(anticogging_pos, 3600.0f);
+            const float map_position = fmodf_pos(
+                    anticogging_pos + config_.anticogging_phase_offset_bins,
+                    3600.0f);
             const uint32_t index0 = (uint32_t)map_position;
             const uint32_t index1 = (index0 + 1) % 3600;
             const float fraction = map_position - (float)index0;
             const float map_torque = (1.0f - fraction) * config_.anticogging.cogging_map[index0] +
                     fraction * config_.anticogging.cogging_map[index1] - anticogging_map_mean_;
-            // The velocity scan's map is attenuated by the loop's rejection and
-            // the feedback filter, so the raw map under-compensates the detent.
-            // cogging_ratio is the tunable feed-forward scale.
+            // cogging_ratio is the tunable feed-forward scale; the map torque is
+            // clamped to the configurable anticogging_torque_limit.
+            const float clamp_limit = std::isfinite(config_.anticogging_torque_limit) &&
+                    config_.anticogging_torque_limit > 0.0f
+                    ? config_.anticogging_torque_limit : 0.005f;
             anticogging_torque_ = anticogging_scale * config_.anticogging.cogging_ratio *
-                    std::clamp(map_torque, -0.005f, 0.005f);
+                    std::clamp(map_torque, -clamp_limit, clamp_limit);
             torque += anticogging_torque_;
         }
     }
@@ -1059,9 +1067,19 @@ bool Controller::update(float* torque_setpoint_output) {
                 abz_velocity_mode && config_.enable_low_speed_compensation;
         friction_compensator_.configure(
                 config_.abz_coulomb_friction_torque,
-                config_.abz_breakaway_torque);
+                config_.abz_breakaway_torque,
+                config_.friction_command_threshold,
+                config_.friction_stall_confirm_time,
+                config_.friction_recovery_speed_ratio,
+                config_.friction_recovery_confirm_time,
+                config_.friction_stall_velocity_threshold,
+                config_.friction_reverse_velocity_threshold,
+                config_.friction_breakaway_rise_rate,
+                config_.friction_assist_reengage_rate,
+                config_.friction_recovery_release_rate,
+                config_.friction_disable_fall_rate);
         const bool ff_active = friction_enabled &&
-                std::abs(vel_des) >= FrictionCompensator::command_threshold;
+                std::abs(vel_des) >= config_.friction_command_threshold;
         if (ff_active) {
             const FrictionCompensationResult compensation =
                     friction_compensator_.update(

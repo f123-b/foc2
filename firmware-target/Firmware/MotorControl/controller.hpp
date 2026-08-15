@@ -60,6 +60,26 @@ public:
         // [Nm] for the ABZ velocity loop. breakaway >= coulomb is enforced.
         float abz_coulomb_friction_torque = 0.0015f;
         float abz_breakaway_torque = 0.0055f;
+        // Friction/breakaway tuning (was hardcoded in FrictionCompensator).
+        float friction_command_threshold = 0.02f;         // [turn/s]
+        float friction_stall_confirm_time = 0.06f;        // [s]
+        float friction_recovery_speed_ratio = 0.85f;      // []
+        float friction_recovery_confirm_time = 0.09f;     // [s]
+        float friction_stall_velocity_threshold = 0.05f;  // [turn/s] (ratio floor)
+        float friction_reverse_velocity_threshold = 0.02f;// [turn/s]
+        float friction_breakaway_rise_rate = 0.020f;      // [Nm/s]
+        float friction_assist_reengage_rate = 0.080f;     // [Nm/s]
+        float friction_recovery_release_rate = 0.020f;    // [Nm/s]
+        float friction_disable_fall_rate = 0.60f;         // [Nm/s]
+        // Anticogging feed-forward tuning.
+        float anticogging_phase_offset_bins = 0.0f;       // bin, -180..+180
+        float anticogging_torque_limit = 0.005f;          // [Nm] map clamp
+        // Anticogging bidirectional scan tuning (used on next calibration).
+        float anticogging_scan_speed = 2.0f;              // [turn/s]
+        float anticogging_scan_velocity_tolerance = 0.5f; // [turn/s]
+        float anticogging_scan_dwell_time = 0.15f;        // [s]
+        float anticogging_scan_turns = 6.0f;              // turns/direction
+        uint16_t anticogging_postprocess_bins_per_cycle = 4;
         uint8_t axis_to_mirror = -1;
         float mirror_ratio = 1.0f;
         uint8_t load_encoder_axis = -1;  // default depends on Axis number and is set in load_configuration()

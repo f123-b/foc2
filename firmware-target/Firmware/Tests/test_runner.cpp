@@ -283,16 +283,21 @@ TEST_SUITE("friction_compensator") {
     }
 
     TEST_CASE("configure clamps breakaway >= coulomb and rejects negatives") {
+        // Helper to call the full 12-arg configure with default tuning values.
+        auto cfg = [](FrictionCompensator& c, float coulomb, float breakaway) {
+            c.configure(coulomb, breakaway, 0.02f, 0.06f, 0.85f, 0.09f,
+                    0.05f, 0.02f, 0.020f, 0.080f, 0.020f, 0.60f);
+        };
         FrictionCompensator compensator;
-        compensator.configure(0.004f, 0.002f);  // breakaway < coulomb
+        cfg(compensator, 0.004f, 0.002f);  // breakaway < coulomb
         CHECK(compensator.coulomb_torque() == doctest::Approx(0.004f));
         CHECK(compensator.breakaway_torque() == doctest::Approx(0.004f));
 
-        compensator.configure(-1.0f, -2.0f);    // negatives -> 0
+        cfg(compensator, -1.0f, -2.0f);    // negatives -> 0
         CHECK(compensator.coulomb_torque() == 0.0f);
         CHECK(compensator.breakaway_torque() == 0.0f);
 
-        compensator.configure(0.0015f, 0.0055f); // normal
+        cfg(compensator, 0.0015f, 0.0055f); // normal
         CHECK(compensator.coulomb_torque() == doctest::Approx(0.0015f));
         CHECK(compensator.breakaway_torque() == doctest::Approx(0.0055f));
     }
