@@ -536,6 +536,15 @@ bool Encoder::update() {
         reset_incremental_velocity_window();
     }
 
+    // Count-time estimator used only by the velocity/position controller.
+    if (mode_ == MODE_INCREMENTAL) {
+        control_velocity_estimate_ = incremental_velocity_estimator_.update(
+                delta_enc, current_meas_period, (float)config_.cpr);
+    } else {
+        incremental_velocity_estimator_.reset();
+        control_velocity_estimate_ = 0.0f;
+    }
+
     if(mode_ & MODE_FLAG_ABS)
         count_in_cpr_ = pos_abs_latched;
 

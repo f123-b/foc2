@@ -5,6 +5,8 @@
 #error "This file should not be included directly. Include odrive_main.h instead."
 #endif
 
+#include "incremental_velocity_estimator.hpp"
+
 
 class Encoder : public ODriveIntf::EncoderIntf {
 public:
@@ -93,6 +95,10 @@ public:
     int32_t incremental_window_delta_count_ = 0;
     float incremental_window_velocity_ = 0.0f;
     bool incremental_window_velocity_valid_ = false;
+    // Count-time estimator for the velocity/position controller only.  The PLL
+    // state above continues to drive commutation and phase interpolation.
+    IncrementalVelocityEstimator incremental_velocity_estimator_;
+    float control_velocity_estimate_ = 0.0f;  // [turn/s]
     float pll_kp_ = 0.0f;   // [count/s / count]
     float pll_ki_ = 0.0f;   // [(count/s^2) / count]
     float calib_scan_response_ = 0.0f; // debug report from offset calib
@@ -134,6 +140,8 @@ public:
         incremental_window_delta_count_ = 0;
         incremental_window_velocity_ = 0.0f;
         incremental_window_velocity_valid_ = false;
+        incremental_velocity_estimator_.reset();
+        control_velocity_estimate_ = 0.0f;
     }
 
     constexpr float getCoggingRatio(){

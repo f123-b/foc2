@@ -394,7 +394,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float v_beta = power_stage_active ? current_control.final_v_beta : 0.0f;
             axis->watchdog_feed();
             respond(response_channel, use_checksum,
-                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g",
+                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g",
                     (unsigned)axis->current_state_, (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
                     (double)v_alpha,
@@ -413,7 +413,12 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (double)axis->controller_.velocity_proportional_torque_,
                     (double)axis->controller_.anticogging_torque_,
                     (double)axis->controller_.final_torque_,
-                    (double)axis->motor_.max_available_torque());
+                    (double)axis->motor_.max_available_torque(),
+                    (double)axis->encoder_.control_velocity_estimate_,
+                    (double)axis->controller_.velocity_error_,
+                    (double)axis->controller_.torque_unsaturated_,
+                    (unsigned)axis->controller_.torque_saturated_,
+                    (double)axis->encoder_.incremental_velocity_estimator_.time_since_last_edge());
         }
 
     } else if (cmd[0] == 'j') { // FOC Studio aggregate telemetry
@@ -538,10 +543,14 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             } else {
                 restore_foc_velocity_tuning(axis);
                 restore_foc_torque_safety(axis);
-                set_foc_control_mode(axis, Controller::CONTROL_MODE_VELOCITY_CONTROL);
-                apply_foc_position_limits(axis, 3.0f, 0.015f);
+                // Position-hold calibration: step through the mechanical cycle,
+                // settle, and sample the holding torque at each position. This
+                // does not depend on the velocity loop being stable at scan
+                // speed, so it is the preferred calibration for the ABZ axis.
+                set_foc_control_mode(axis, Controller::CONTROL_MODE_POSITION_CONTROL);
+                apply_foc_position_limits(axis, 1.0f, 0.015f);
                 foc_position_limits[axis->axis_num_].cogging_calibration = true;
-                axis->controller_.start_anticogging_calibration(true);
+                axis->controller_.start_anticogging_calibration(false);
                 axis->requested_state_ = Axis::AXIS_STATE_CLOSED_LOOP_CONTROL;
                 axis->watchdog_feed();
                 respond(response_channel, use_checksum, "ok cogging-calibrating");

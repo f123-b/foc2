@@ -6,7 +6,7 @@
 #endif
 
 #include "velocity_filter.hpp"
-#include "low_speed_compensator.hpp"
+#include "friction_compensator.hpp"
 
 class Controller : public ODriveIntf::ControllerIntf {
 public:
@@ -43,6 +43,9 @@ public:
         bool enable_vel_limit = true;
         bool enable_overspeed_error = true;
         bool enable_current_mode_vel_limit = true;  // enable velocity limit in current control mode (requires a valid velocity estimator)
+        // Low-speed friction/breakaway feed-forward.  Defaults to off so the
+        // ABZ velocity loop can be verified as a plain PI controller first.
+        bool enable_low_speed_compensation = false;
         uint8_t axis_to_mirror = -1;
         float mirror_ratio = 1.0f;
         uint8_t load_encoder_axis = -1;  // default depends on Axis number and is set in load_configuration()
@@ -133,9 +136,13 @@ public:
     float velocity_proportional_torque_ = 0.0f;
     float anticogging_torque_ = 0.0f;
     float final_torque_ = 0.0f;
-    LowSpeedCompensator low_speed_compensator_;
+    // PI telemetry: velocity error, unsaturated torque and saturation flag.
+    float velocity_error_ = 0.0f;
+    float torque_unsaturated_ = 0.0f;
+    bool torque_saturated_ = false;
+    FrictionCompensator friction_compensator_;
     float low_speed_friction_torque_ = 0.0f;
-    uint8_t low_speed_compensator_state_ = LowSpeedCompensator::STATE_IDLE;
+    uint8_t low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
     float position_error_ = 0.0f;
     bool position_low_speed_active_ = false;
 

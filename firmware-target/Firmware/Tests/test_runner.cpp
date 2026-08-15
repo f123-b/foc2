@@ -12,7 +12,8 @@
 #include <doctest.h>
 
 #include <communication/can_helpers.hpp>
-#include <low_speed_compensator.hpp>
+#include <incremental_velocity_estimator.hpp>
+#include <friction_compensator.hpp>
 #include <velocity_filter.hpp>
 
 using std::cout;
@@ -135,229 +136,106 @@ TEST_SUITE("velocity_feedback_filter") {
     }
 }
 
-TEST_SUITE("low_speed_compensator") {
-    TEST_CASE("count progress prevents false stall detection") {
-        LowSpeedCompensator compensator;
-        LowSpeedCompensationResult result;
-        int32_t count = 0;
-        for (int i = 0; i < 8000; ++i) {
-            if (i % 10 == 0)
-                ++count;
-            result = compensator.update(
-                    true, 1.0f, 1.5f, 1.5f, 0.0f, 0.0f,
-                    count, 0.000125f);
-        }
-        CHECK(result.state == LowSpeedCompensator::STATE_RUNNING);
-        CHECK_FALSE(result.hold_integrator);
-        CHECK(result.friction_torque == doctest::Approx(
-                LowSpeedCompensator::running_torque_for_command(1.5f)).epsilon(0.02f));
-    }
+TEST_SUITE("friction_compensator") {
+    constexpr float dt = 0.000125f;
 
-    TEST_CASE("holds the integrator and ramps breakaway torque while stalled") {
-        LowSpeedCompensator compensator;
-        LowSpeedCompensationResult result;
-        for (int i = 0; i < 12000; ++i) {
-            result = compensator.update(
-                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.001f,
-                    0, 0.000125f);
-        }
-        CHECK(result.state == LowSpeedCompensator::STATE_BREAKAWAY);
-        CHECK(result.hold_integrator);
-        CHECK(result.friction_torque == doctest::Approx(
-                LowSpeedCompensator::breakaway_torque).epsilon(0.02f));
-    }
-
-    TEST_CASE("extended ceiling is confined to the lowest speed") {
-        LowSpeedCompensator low_speed;
-        LowSpeedCompensationResult low_result;
-        for (int i = 0; i < 12000; ++i) {
-            low_result = low_speed.update(
-                    true, 1.0f, 0.5f, 0.0f, 0.5f, 0.0f,
-                    0, 0.000125f);
-        }
-        CHECK(low_result.friction_torque == doctest::Approx(
-                LowSpeedCompensator::breakaway_torque).epsilon(0.02f));
-
-        LowSpeedCompensator nominal_speed;
-        LowSpeedCompensationResult nominal_result;
-        for (int i = 0; i < 12000; ++i) {
-            nominal_result = nominal_speed.update(
-                    true, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f,
-                    0, 0.000125f);
-        }
-        CHECK(nominal_result.friction_torque == doctest::Approx(
-                LowSpeedCompensator::nominal_breakaway_torque).epsilon(0.02f));
-    }
-
-    TEST_CASE("low speed running torque stays above static friction") {
-        CHECK(LowSpeedCompensator::running_torque_for_command(0.5f) ==
-                doctest::Approx(
-                        LowSpeedCompensator::nominal_breakaway_torque)
-                        .epsilon(0.02f));
-        CHECK(LowSpeedCompensator::running_torque_for_command(1.0f) ==
-                doctest::Approx(
-                        LowSpeedCompensator::nominal_breakaway_torque)
-                        .epsilon(0.02f));
-        CHECK(LowSpeedCompensator::running_torque_for_command(1.25f) ==
-                doctest::Approx(LowSpeedCompensator::running_torque)
-                        .epsilon(0.02f));
-        CHECK(LowSpeedCompensator::running_torque_for_command(1.5f) ==
-                doctest::Approx(LowSpeedCompensator::running_torque)
-                        .epsilon(0.02f));
-        CHECK(LowSpeedCompensator::running_torque_for_command(2.0f) ==
-                doctest::Approx(LowSpeedCompensator::running_torque)
-                        .epsilon(0.02f));
-    }
-
-    TEST_CASE("isolated count edges still confirm a stall") {
-        LowSpeedCompensator compensator;
-        LowSpeedCompensationResult result;
-        int32_t count = 0;
-        for (int i = 0; i < 12000; ++i) {
-            // Simulate a one-count ABZ bounce that returns to the same
-            // position. It must not keep the stall timer alive forever.
-            count = (i / 10) & 1;
-            result = compensator.update(
-                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
-                    count, 0.000125f);
-        }
-        CHECK(result.state == LowSpeedCompensator::STATE_BREAKAWAY);
-        CHECK(result.hold_integrator);
-    }
-
-    TEST_CASE("low speed error assist builds torque before stall") {
-        LowSpeedCompensator compensator;
-        LowSpeedCompensationResult result;
+    TEST_CASE("running applies coulomb feed-forward in the command direction") {
+        FrictionCompensator compensator;
+        FrictionCompensationResult result;
         for (int i = 0; i < 4000; ++i) {
             result = compensator.update(
-                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
-                    i / 10, 0.000125f);
+                    true, 0.5f, 0.5f, 0.0f, i / 10, dt);
         }
-        CHECK(result.state == LowSpeedCompensator::STATE_RUNNING);
-        CHECK(result.friction_torque > LowSpeedCompensator::running_torque);
+        CHECK(result.state == FrictionCompensator::STATE_RUNNING);
+        CHECK(result.friction_torque == doctest::Approx(
+                FrictionCompensator::coulomb_torque).epsilon(0.02f));
     }
 
-    TEST_CASE("low speed hold remains through small tracking error") {
-        LowSpeedCompensator compensator;
-        LowSpeedCompensationResult result;
-        for (int i = 0; i < 12000; ++i) {
+    TEST_CASE("feed-forward fades toward zero near zero command") {
+        FrictionCompensator compensator;
+        FrictionCompensationResult result;
+        for (int i = 0; i < 4000; ++i) {
             result = compensator.update(
-                    true, 1.0f, 0.5f, 0.35f, 0.15f, 0.0f,
-                    i / 10, 0.000125f);
+                    true, 0.005f, 0.005f, 0.0f, i / 10, dt);
         }
-        const float held_torque = result.friction_torque;
-        for (int i = 0; i < 2000; ++i) {
-            result = compensator.update(
-                    true, 1.0f, 0.5f, 0.49f, 0.01f, 0.0f,
-                    1200 + i / 10, 0.000125f);
-        }
-        // The positive-error assist is allowed to fade as the tracking error
-        // closes, but the bounded hold term must remain available so the
-        // rotor does not fall back into static friction.
-        CHECK(result.friction_torque >=
-                (LowSpeedCompensator::running_torque +
-                 LowSpeedCompensator::speed_hold_limit) * 0.95f);
-        CHECK(result.friction_torque <= LowSpeedCompensator::breakaway_torque);
+        // 0.005 / 0.02 = 0.25 of the coulomb level, never full coulomb.
+        CHECK(result.friction_torque < FrictionCompensator::coulomb_torque);
+        CHECK(result.friction_torque > 0.0f);
     }
 
-    TEST_CASE("count dither cannot release breakaway torque") {
-        LowSpeedCompensator compensator;
+    TEST_CASE("breakaway engages when stalled with persistent error") {
+        FrictionCompensator compensator;
+        FrictionCompensationResult result;
         for (int i = 0; i < 12000; ++i) {
-            compensator.update(
-                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
-                    0, 0.000125f);
-        }
-        auto result = compensator.update(
-                true, 1.0f, 0.2f, 0.1f, 0.1f, 0.0f,
-                1, 0.000125f);
-        CHECK(result.state == LowSpeedCompensator::STATE_BREAKAWAY);
-        for (int i = 0; i < 200; ++i) {
             result = compensator.update(
-                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
-                    (i & 1) ? 0 : 1, 0.000125f);
+                    true, 0.2f, 0.0f, 0.2f, 0, dt);
         }
-        CHECK(result.state == LowSpeedCompensator::STATE_BREAKAWAY);
-        CHECK(result.hold_integrator);
+        CHECK(result.state == FrictionCompensator::STATE_BREAKAWAY);
+        CHECK(result.friction_torque == doctest::Approx(
+                FrictionCompensator::breakaway_torque).epsilon(0.02f));
     }
 
-    TEST_CASE("sustained forward counts enter recovery and unload promptly") {
-        LowSpeedCompensator compensator;
-        for (int i = 0; i < 12000; ++i) {
-            compensator.update(
-                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
-                    0, 0.000125f);
-        }
-        LowSpeedCompensationResult result;
-        for (int32_t count = 1; count <=
-                LowSpeedCompensator::recovery_progress_counts; ++count) {
-            result = compensator.update(
-                    true, 1.0f, 0.2f, 0.2f, 0.0f, 0.0f,
-                    count, 0.000125f);
-        }
-        // The count threshold is necessary but not sufficient; keep the
-        // assist engaged until the measured speed has been confirmed.
-        CHECK(result.state == LowSpeedCompensator::STATE_BREAKAWAY);
-        for (int i = 0; i < 120; ++i) {
-            result = compensator.update(
-                    true, 1.0f, 0.2f, 0.2f, 0.0f, 0.0f,
-                    LowSpeedCompensator::recovery_progress_counts,
-                    0.000125f);
-        }
-        CHECK(result.state == LowSpeedCompensator::STATE_RECOVERING);
-        CHECK_FALSE(result.hold_integrator);
+    TEST_CASE("breakaway ramps instead of stepping") {
+        FrictionCompensator compensator;
+        FrictionCompensationResult result;
         for (int i = 0; i < 600; ++i) {
             result = compensator.update(
-                    true, 1.0f, 0.2f, 0.2f, 0.0f, 0.0f,
-                    LowSpeedCompensator::recovery_progress_counts + i / 10,
-                    0.000125f);
+                    true, 0.2f, 0.0f, 0.2f, 0, dt);
         }
-        CHECK(result.state == LowSpeedCompensator::STATE_RUNNING);
-        CHECK_FALSE(result.hold_integrator);
-        CHECK(result.friction_torque >=
-                LowSpeedCompensator::running_torque_for_command(0.2f));
-        CHECK(result.friction_torque <= LowSpeedCompensator::breakaway_torque);
+        // Just past the stall-confirm time: breakaway state, but the slew
+        // limit means the torque has not yet reached the breakaway peak.
+        CHECK(result.state == FrictionCompensator::STATE_BREAKAWAY);
+        CHECK(result.friction_torque < FrictionCompensator::breakaway_torque);
     }
 
-    TEST_CASE("overspeed removes excess but keeps running torque") {
-        LowSpeedCompensator compensator;
-        LowSpeedCompensationResult result;
-        for (int i = 0; i < 400; ++i)
+    TEST_CASE("confirmed progress releases breakaway back to coulomb") {
+        FrictionCompensator compensator;
+        for (int i = 0; i < 12000; ++i) {
+            compensator.update(true, 0.2f, 0.0f, 0.2f, 0, dt);
+        }
+        FrictionCompensationResult result;
+        int32_t count = 0;
+        for (int i = 0; i < 4000; ++i) {
+            count += 4;  // clear forward progress every cycle
             result = compensator.update(
-                    true, 1.0f, 0.2f, 0.6f, -0.4f, 0.0f,
-                    i, 0.000125f);
-        CHECK(result.friction_torque >= 0.0f);
+                    true, 0.2f, 0.2f, 0.0f, count, dt);
+        }
+        CHECK(result.state == FrictionCompensator::STATE_RUNNING);
         CHECK(result.friction_torque <=
-                LowSpeedCompensator::running_torque + 0.0001f);
+                FrictionCompensator::coulomb_torque + 0.0001f);
     }
 
     TEST_CASE("direction reversal cannot reuse positive compensation") {
-        LowSpeedCompensator compensator;
-        for (int i = 0; i < 8000; ++i) {
-            compensator.update(
-                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
-                    0, 0.000125f);
+        FrictionCompensator compensator;
+        for (int i = 0; i < 4000; ++i) {
+            compensator.update(true, 0.2f, 0.2f, 0.0f, i / 10, dt);
         }
         const auto result = compensator.update(
-                true, -1.0f, -0.2f, 0.0f, -0.2f, 0.0f,
-                0, 0.000125f);
+                true, -0.2f, 0.0f, -0.2f, 0, dt);
         CHECK(result.friction_torque <= 0.0f);
-        CHECK(std::abs(result.friction_torque) < 0.00001f);
     }
 
-    TEST_CASE("zero command clears compensation immediately") {
-        LowSpeedCompensator compensator;
-        for (int i = 0; i < 8000; ++i) {
-            compensator.update(
-                    true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
-                    0, 0.000125f);
+    TEST_CASE("zero command clears immediately") {
+        FrictionCompensator compensator;
+        for (int i = 0; i < 4000; ++i) {
+            compensator.update(true, 0.2f, 0.2f, 0.0f, i / 10, dt);
         }
         const auto result = compensator.update(
-                false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                0, 0.000125f);
+                false, 0.0f, 0.0f, 0.0f, 0, dt);
         CHECK(result.friction_torque == 0.0f);
-        CHECK_FALSE(result.hold_integrator);
-        CHECK(compensator.compensation_magnitude() == 0.0f);
-        CHECK(compensator.state() == LowSpeedCompensator::STATE_IDLE);
+        CHECK(compensator.state() == FrictionCompensator::STATE_IDLE);
+    }
+
+    TEST_CASE("isolated count dither does not reset the stall timer") {
+        FrictionCompensator compensator;
+        FrictionCompensationResult result;
+        for (int i = 0; i < 12000; ++i) {
+            // One-count ABZ bounce that returns to the same position.
+            const int32_t count = (i / 10) & 1;
+            result = compensator.update(
+                    true, 0.2f, 0.0f, 0.2f, count, dt);
+        }
+        CHECK(result.state == FrictionCompensator::STATE_BREAKAWAY);
     }
 }
 
@@ -414,5 +292,168 @@ TEST_SUITE("vel_ramp") {
         CHECK(parity(0x0DDF & 0x7FFF) == 0);
         CHECK(parity(0x8DDF & 0x7FFF) == 0);
         CHECK(parity(0x5BFF & 0x7FFF) == 1);
+    }
+}
+
+TEST_SUITE("incremental_velocity_estimator") {
+    constexpr float dt = 0.000125f;  // 8 kHz control period
+
+    // Feed a constant mechanical speed using a sub-count position accumulator
+    // so the emitted integer count deltas are the exact sequence a real ABZ
+    // encoder would produce.
+    float run_constant_speed(IncrementalVelocityEstimator& est, float speed,
+                             float cpr, float dt, int cycles) {
+        double pos = 0.0;
+        int32_t prev_count = 0;
+        float v = 0.0f;
+        for (int i = 0; i < cycles; ++i) {
+            pos += (double)speed * (double)cpr * (double)dt;
+            const int32_t count = (int32_t)std::floor(pos);
+            const int32_t delta = count - prev_count;
+            prev_count = count;
+            v = est.update(delta, dt, cpr);
+        }
+        return v;
+    }
+
+    TEST_CASE("constant positive speed for several CPR values") {
+        for (float cpr : {4000.0f, 8192.0f, 16384.0f}) {
+            for (float speed : {0.2f, 0.5f, 1.0f, 2.0f}) {
+                IncrementalVelocityEstimator est;
+                const float v = run_constant_speed(est, speed, cpr, dt, 40000);
+                CHECK(v == doctest::Approx(speed).epsilon(0.05f));
+            }
+        }
+    }
+
+    TEST_CASE("constant negative speed") {
+        IncrementalVelocityEstimator est;
+        const float v = run_constant_speed(est, -1.0f, 4000.0f, dt, 40000);
+        CHECK(v == doctest::Approx(-1.0f).epsilon(0.05f));
+    }
+
+    TEST_CASE("startup from zero converges without a huge overshoot") {
+        IncrementalVelocityEstimator est;
+        float v = 0.0f;
+        float max_v = 0.0f;
+        double pos = 0.0;
+        int32_t prev_count = 0;
+        for (int i = 0; i < 40000; ++i) {
+            pos += 0.2 * 4000.0 * (double)dt;
+            const int32_t count = (int32_t)std::floor(pos);
+            const int32_t delta = count - prev_count;
+            prev_count = count;
+            v = est.update(delta, dt, 4000.0f);
+            max_v = std::max(max_v, v);
+        }
+        CHECK(v == doctest::Approx(0.2f).epsilon(0.05f));
+        CHECK(max_v < 0.4f);  // slew-limited, no runaway spike
+    }
+
+    TEST_CASE("sudden stop decays to zero") {
+        IncrementalVelocityEstimator est;
+        run_constant_speed(est, 1.0f, 4000.0f, dt, 20000);
+        float v = 0.0f;
+        for (int i = 0; i < 4000; ++i)
+            v = est.update(0, dt, 4000.0f);
+        CHECK(std::fabs(v) < 0.01f);
+    }
+
+    TEST_CASE("reversal crosses zero and tracks the new direction") {
+        IncrementalVelocityEstimator est;
+        run_constant_speed(est, 1.0f, 4000.0f, dt, 20000);
+        const float v = run_constant_speed(est, -1.0f, 4000.0f, dt, 40000);
+        CHECK(v == doctest::Approx(-1.0f).epsilon(0.05f));
+    }
+
+    TEST_CASE("multiple counts per control cycle at high speed") {
+        IncrementalVelocityEstimator est;
+        const float v = run_constant_speed(est, 10.0f, 4000.0f, dt, 40000);
+        CHECK(v == doctest::Approx(10.0f).epsilon(0.05f));
+    }
+
+    TEST_CASE("sparse counts at very low speed do not read zero") {
+        IncrementalVelocityEstimator est;
+        run_constant_speed(est, 0.05f, 4000.0f, dt, 5000);  // warm up
+        double pos = 5000 * 0.05 * 4000.0 * (double)dt;
+        int32_t prev_count = (int32_t)std::floor(pos);
+        float v = 0.0f;
+        float min_v = 1e9f;
+        for (int i = 0; i < 20000; ++i) {
+            pos += 0.05 * 4000.0 * (double)dt;
+            const int32_t count = (int32_t)std::floor(pos);
+            const int32_t delta = count - prev_count;
+            prev_count = count;
+            v = est.update(delta, dt, 4000.0f);
+            min_v = std::min(min_v, v);
+        }
+        CHECK(v == doctest::Approx(0.05f).epsilon(0.20f));
+        CHECK(min_v > 0.0f);  // never collapses to zero at constant speed
+    }
+
+    TEST_CASE("a single stray count is slew limited, not a spike") {
+        IncrementalVelocityEstimator est;
+        run_constant_speed(est, 0.0f, 4000.0f, dt, 100);  // settle at zero
+        est.update(1, dt, 4000.0f);  // one glitch count
+        float v = 0.0f;
+        for (int i = 0; i < 100; ++i)
+            v = est.update(0, dt, 4000.0f);  // let max publish window fire
+        CHECK(v < 0.05f);
+    }
+}
+
+TEST_SUITE("velocity_integrator_antiwindup") {
+    // Reference of the controller's conditional-integration step so the logic
+    // itself is covered on the host even though the full axis is not linked.
+    float step(float integrator, float ki, float v_err, float dt,
+               float torque_unsaturated, float Tlim) {
+        const bool saturated_high = torque_unsaturated > Tlim;
+        const bool saturated_low = torque_unsaturated < -Tlim;
+        const bool windup_forward = saturated_high && v_err > 0.0f;
+        const bool windup_reverse = saturated_low && v_err < 0.0f;
+        if (!windup_forward && !windup_reverse)
+            integrator += ki * v_err * dt;
+        return std::clamp(integrator, -Tlim, Tlim);
+    }
+
+    TEST_CASE("integrator does not wind up in forward saturation") {
+        const float Tlim = 0.025f;
+        const float ki = 0.01f;
+        const float dt = 0.000125f;
+        float integrator = 0.0f;
+        const float before = integrator;
+        // Torque is saturated high while error keeps pushing forward: hold.
+        integrator = step(integrator, ki, 1.0f, dt, Tlim + 0.1f, Tlim);
+        CHECK(integrator == doctest::Approx(before));
+    }
+
+    TEST_CASE("integrator releases when the error reverses") {
+        const float Tlim = 0.025f;
+        const float ki = 0.01f;
+        const float dt = 0.000125f;
+        float integrator = 0.001f;
+        // Saturated high but error negative now: allow integration (release).
+        const float released = step(integrator, ki, -1.0f, dt, Tlim + 0.1f, Tlim);
+        CHECK(released < integrator);
+    }
+
+    TEST_CASE("integrator integrates normally when unsaturated") {
+        const float Tlim = 0.025f;
+        const float ki = 0.01f;
+        const float dt = 0.000125f;
+        float integrator = 0.0f;
+        integrator = step(integrator, ki, 1.0f, dt, 0.0f, Tlim);
+        CHECK(integrator == doctest::Approx(ki * 1.0f * dt));
+    }
+
+    TEST_CASE("integrator is bounded by the torque limit") {
+        const float Tlim = 0.025f;
+        const float ki = 0.01f;
+        const float dt = 0.000125f;
+        float integrator = 0.0f;
+        for (int i = 0; i < 100000; ++i)
+            integrator = step(integrator, ki, 0.001f, dt, 0.0f, Tlim);
+        CHECK(integrator <= Tlim);
+        CHECK(integrator >= -Tlim);
     }
 }

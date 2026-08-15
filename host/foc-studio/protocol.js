@@ -197,7 +197,9 @@ export function parseFastTelemetry(line) {
     velocityIntegratorTorque = 0, lowSpeedTorque = 0,
     positionSetpoint = position, positionError = 0, lowSpeedState = 0,
     velocityProportionalTorque = 0, anticoggingTorque = 0,
-    finalTorque = 0, maxAvailableTorque = 0] = values;
+    finalTorque = 0, maxAvailableTorque = 0,
+    controlVelocity = velocity, velocityError = 0,
+    torqueUnsaturated = 0, torqueSaturated = 0, estimatorElapsed = 0] = values;
   return {
     axisState: AXIS_STATE[state] ?? `状态 ${state}`,
     stateCode: state,
@@ -223,6 +225,11 @@ export function parseFastTelemetry(line) {
     anticoggingTorque,
     finalTorque,
     maxAvailableTorque,
+    controlVelocity,
+    velocityError,
+    torqueUnsaturated,
+    torqueSaturated,
+    estimatorElapsed,
   };
 }
 
