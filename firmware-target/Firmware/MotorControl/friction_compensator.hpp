@@ -6,22 +6,29 @@
 #include <cstdint>
 
 struct FrictionCompensationResult {
-    float friction_torque = 0.0f;
+    float friction_torque = 0.0f;   // post-slew output
+    float target_torque = 0.0f;     // pre-slew target
+    float speed_ratio = 0.0f;       // abs(measured)/max(abs(command), min_speed)
+    float assist_blend = 0.0f;      // (1 - speed_ratio)^2
+    float no_progress_time = 0.0f;  // [s] since last confirmed forward progress
+    float recovery_timer = 0.0f;    // [s] sustained speed ratio above threshold
     uint8_t state = 0;
 };
 
 // Minimal Coulomb-friction feed-forward plus a static breakaway assist for
-// the ABZ velocity loop.  It replaces the old LowSpeedCompensator state
-// machine: there is exactly ONE integrator in the whole loop (the velocity PI
-// with anti-windup), and this class only produces a bounded, slew-limited
-// feed-forward.
+// the ABZ velocity loop.  Exactly ONE integrator exists in the whole loop (the
+// velocity PI with anti-windup); this class only produces a bounded,
+// slew-limited feed-forward.
 //
-//   RUNNING     -> output = sign(command) * coulomb_torque (faded near 0)
-//   BREAKAWAY   -> output ramps toward sign(command) * breakaway_torque when
-//                  the rotor is stationary with persistent positive error
-//   RECOVERING  -> output ramps back to coulomb_torque after confirmed progress
+//   RUNNING     -> output = sign(command) * coulomb (faded near 0)
+//   BREAKAWAY   -> output ramps up toward sign(command) * breakaway while the
+//                  rotor is stationary with persistent positive error
+//   RECOVERING  -> output smoothly blends from breakaway toward coulomb as the
+//                  measured speed approaches the command (no torque step)
 //
-// No speed-hold integrator, no error-assist term, no overspeed torque fade.
+// RECOVERING is held until the measured speed has stayed above a fraction of
+// the command for a dwell time, so a brief re-stall raises the assist smoothly
+// instead of cycling RUNNING -> BREAKAWAY -> RUNNING.
 class FrictionCompensator {
 public:
     enum State : uint8_t {
@@ -33,17 +40,23 @@ public:
 
     // Command magnitude below which the feed-forward fades to zero [turn/s].
     static constexpr float command_threshold = 0.02f;
-    // Slew rates [Nm/s].  Slow rise avoids a torque step into the detent;
-    // fast fall unloads promptly once the rotor is moving.
-    static constexpr float torque_rise_rate = 0.020f;
-    static constexpr float torque_fall_rate = 0.60f;
-    // Persistence required before engaging / disengaging breakaway.
+    // Ramp up toward breakaway (slow, avoids a torque step into the detent).
+    static constexpr float breakaway_rise_rate = 0.020f;      // Nm/s
+    // Smooth release from breakaway toward coulomb during RECOVERING.
+    static constexpr float recovery_release_rate = 0.040f;    // Nm/s
+    // Fast ramp-to-zero only for command=0 / disable / closed-loop exit.
+    static constexpr float disable_fall_rate = 0.60f;         // Nm/s
+    // Persistence required before engaging breakaway from RUNNING.
     static constexpr float stall_confirm_time = 0.060f;
-    static constexpr float recovery_confirm_time = 0.012f;
-    // Confirmed encoder counts (in the command direction) before unloading.
+    // Confirmed encoder counts (in the command direction) before leaving
+    // BREAKAWAY for RECOVERING.
     static constexpr int32_t recovery_progress_counts = 3;
-    // Fraction of the commanded speed that counts as "confirmed moving".
-    static constexpr float recovery_speed_ratio = 0.55f;
+    // Measured/command speed ratio above which RECOVERING may finish.
+    static constexpr float recovery_enter_running_ratio = 0.85f;
+    // Dwell time at/above that ratio before RECOVERING -> RUNNING.
+    static constexpr float recovery_hold_time = 0.090f;
+    // Denominator floor for the speed ratio (avoids division by zero).
+    static constexpr float minimum_speed = 0.05f;
 
     // Runtime torque amplitudes, set from the controller config each control
     // cycle. breakaway >= coulomb is enforced here so illegal parameters
@@ -62,7 +75,7 @@ public:
         state_ = STATE_IDLE;
         direction_ = 0.0f;
         no_progress_time_ = 0.0f;
-        recovery_confirm_timer_ = 0.0f;
+        recovery_hold_timer_ = 0.0f;
         output_ = 0.0f;
         initialized_ = false;
         progress_count_ = 0;
@@ -97,17 +110,15 @@ public:
         const float direction = command_velocity > 0.0f ? 1.0f :
                 command_velocity < 0.0f ? -1.0f : 0.0f;
         if (!active || direction == 0.0f) {
-            // Graceful ramp-to-zero: never step the output to zero in a single
-            // control cycle. Hard clear() is reserved for fault / estop / exit
-            // from closed loop.
-            output_ = slew(output_, 0.0f, period);
+            // Fast graceful ramp-to-zero (command zero / disabled / exit).
+            output_ = slew(output_, 0.0f, disable_fall_rate, period);
             if (std::abs(output_) < 0.0001f) {
                 clear();
             } else {
                 state_ = STATE_IDLE;
                 direction_ = 0.0f;
                 no_progress_time_ = 0.0f;
-                recovery_confirm_timer_ = 0.0f;
+                recovery_hold_timer_ = 0.0f;
                 initialized_ = false;
             }
             result.friction_torque = output_;
@@ -140,59 +151,76 @@ public:
         }
         no_progress_time_ = forward_progress ? 0.0f : no_progress_time_ + period;
 
-        // Coulomb FF, faded smoothly to zero as the command approaches zero.
         const float command_mag = std::abs(command_velocity);
         const float coulomb_blend = std::clamp(
                 command_mag / command_threshold, 0.0f, 1.0f);
-        float target = direction * coulomb_torque_ * coulomb_blend;
+        const float coulomb_target = direction * coulomb_torque_ * coulomb_blend;
+
+        // Smooth recovery: the assist fades quadratically as the measured
+        // speed approaches the command.
+        const float speed_ratio = std::clamp(
+                std::abs(measured_velocity) /
+                        std::max(command_mag, minimum_speed),
+                0.0f, 1.0f);
+        const float assist_blend = (1.0f - speed_ratio) * (1.0f - speed_ratio);
 
         if (state_ == STATE_IDLE)
             state_ = STATE_RUNNING;
 
         const float forward_error = velocity_error * direction;
         const bool persistent_stall = no_progress_time_ >= stall_confirm_time;
-        const bool want_breakaway =
-                forward_error > 0.0f && persistent_stall;
 
-        if (state_ == STATE_RUNNING || state_ == STATE_RECOVERING) {
-            if (want_breakaway) {
+        float target = coulomb_target;
+        if (state_ == STATE_RUNNING) {
+            if (forward_error > 0.0f && persistent_stall) {
                 state_ = STATE_BREAKAWAY;
                 breakaway_start_count_ = progress_count_;
-                recovery_confirm_timer_ = 0.0f;
+                recovery_hold_timer_ = 0.0f;
             }
         } else if (state_ == STATE_BREAKAWAY) {
-            if (want_breakaway) {
-                // stay in breakaway, refresh the progress reference
-                breakaway_start_count_ = progress_count_;
-            }
+            target = direction * breakaway_torque_;
             const int64_t breakaway_progress =
                     static_cast<int64_t>(progress_count_) -
                     static_cast<int64_t>(breakaway_start_count_);
             const bool progressed = static_cast<float>(breakaway_progress) *
                     direction >= static_cast<float>(recovery_progress_counts);
-            const bool speed_confirmed =
-                    measured_velocity * direction >=
-                            recovery_speed_ratio * command_mag;
-            recovery_confirm_timer_ = (progressed && speed_confirmed)
-                    ? recovery_confirm_timer_ + period : 0.0f;
-            if (recovery_confirm_timer_ >= recovery_confirm_time) {
+            if (progressed) {
                 state_ = STATE_RECOVERING;
-                recovery_confirm_timer_ = 0.0f;
+                recovery_hold_timer_ = 0.0f;
+            }
+        } else if (state_ == STATE_RECOVERING) {
+            // Continuous blend from breakaway (speed 0) to coulomb (speed
+            // reaches command). Re-stalls raise the assist smoothly without a
+            // stall_confirm_time wait or a RUNNING->BREAKAWAY cycle.
+            target = direction * (coulomb_torque_ +
+                    assist_blend * (breakaway_torque_ - coulomb_torque_));
+            if (speed_ratio >= recovery_enter_running_ratio) {
+                recovery_hold_timer_ += period;
+            } else {
+                recovery_hold_timer_ = 0.0f;
+            }
+            if (recovery_hold_timer_ >= recovery_hold_time) {
+                state_ = STATE_RUNNING;
             }
         }
 
-        if (state_ == STATE_BREAKAWAY)
-            target = direction * breakaway_torque_;
-
-        output_ = slew(output_, target, period);
-
-        // Once the output has slewed back to the Coulomb level, go RUNNING.
-        if (state_ == STATE_RECOVERING &&
-                std::abs(output_ - direction * coulomb_torque_ * coulomb_blend) <= 0.0001f) {
-            state_ = STATE_RUNNING;
+        // Slew-rate selection.
+        float rate = breakaway_rise_rate;
+        if (state_ == STATE_BREAKAWAY) {
+            rate = breakaway_rise_rate;
+        } else if (state_ == STATE_RECOVERING || state_ == STATE_RUNNING) {
+            const bool releasing = std::abs(target) < std::abs(output_);
+            rate = releasing ? recovery_release_rate : breakaway_rise_rate;
         }
 
+        output_ = slew(output_, target, rate, period);
+
         result.friction_torque = output_;
+        result.target_torque = target;
+        result.speed_ratio = speed_ratio;
+        result.assist_blend = assist_blend;
+        result.no_progress_time = no_progress_time_;
+        result.recovery_timer = recovery_hold_timer_;
         result.state = static_cast<uint8_t>(state_);
         return result;
     }
@@ -201,12 +229,7 @@ public:
     State state() const { return state_; }
 
 private:
-    float slew(float value, float target, float period) {
-        // Rise/fall is selected by torque MAGNITUDE so +direction and
-        // -direction behave symmetrically (the old target>=value comparison
-        // used the fall rate for every negative-direction move).
-        const float rate = std::abs(target) >= std::abs(value)
-                ? torque_rise_rate : torque_fall_rate;
+    float slew(float value, float target, float rate, float period) {
         const float step = rate * period;
         return value + std::clamp(target - value, -step, step);
     }
@@ -214,7 +237,7 @@ private:
     State state_ = STATE_IDLE;
     float direction_ = 0.0f;
     float no_progress_time_ = 0.0f;
-    float recovery_confirm_timer_ = 0.0f;
+    float recovery_hold_timer_ = 0.0f;
     float output_ = 0.0f;
     bool initialized_ = false;
     int32_t progress_count_ = 0;

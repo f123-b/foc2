@@ -53,6 +53,11 @@ const state = {
   abzCoulombFrictionTorque: 0,
   abzBreakawayTorque: 0,
   enableLowSpeedCompensation: 0,
+  frictionTargetTorque: 0,
+  frictionSpeedRatio: 0,
+  frictionAssistBlend: 0,
+  frictionNoProgressTime: 0,
+  frictionRecoveryTimer: 0,
   observerLocked: false,
   angleError: 0,
   motorError: 0,
@@ -91,7 +96,7 @@ const dom = Object.fromEntries([
   'mobileViewSelect', 'pwmStatus', 'watchdogStatus', 'currentStatus', 'controlReadyStatus',
   'currentModeBadge', 'safeProfileButton', 'scopeRunButton', 'scopeClearButton',
   'scopeAutoScaleButton', 'scopeWindowSelect', 'scopeCaptureState', 'scopeSampleRate',
-  'scopePresetVelocityButton', 'scopePresetCurrentButton',
+  'scopePresetVelocityButton', 'scopePresetCurrentButton', 'scopePresetLowSpeedButton',
   'scopeWindowLabel', 'scopeWindowEndLabel', 'scopeRunIndicator', 'scopeAxisMin',
   'scopeAxisMax', 'scopeAxisApplyButton', 'scopeAxisResetButton', 'scopeMeasurements',
   'scopeSelectionBox', 'scopeCursorTooltip', 'consoleChartLegend',
@@ -872,6 +877,9 @@ const chartSeries = Object.freeze({
   velocityError: { label: '速度误差', color: '#0ea5e9', floor: 0.01, unit: 'turn/s' },
   lowSpeedTorque: { label: '摩擦转矩', color: '#b45309', floor: 0.001, unit: 'Nm' },
   frictionState: { label: '摩擦状态', color: '#8b5cf6', floor: 0.001, unit: '' },
+  frictionTargetTorque: { label: '摩擦目标转矩', color: '#f472b6', floor: 0.001, unit: 'Nm' },
+  frictionSpeedRatio: { label: '摩擦速度比', color: '#22d3ee', floor: 0.001, unit: '' },
+  frictionAssistBlend: { label: '破槽混合比', color: '#a3e635', floor: 0.001, unit: '' },
   velocityProportionalTorque: { label: '速度 P 转矩', color: '#9354c7', floor: 0.001, unit: 'Nm' },
   anticoggingTorque: { label: '齿槽补偿转矩', color: '#0f9f6e', floor: 0.001, unit: 'Nm' },
   finalTorque: { label: '最终转矩', color: '#444ce7', floor: 0.001, unit: 'Nm' },
@@ -908,6 +916,9 @@ function captureTelemetrySample() {
     velocityError: state.velocityError,
     lowSpeedTorque: state.lowSpeedTorque,
     frictionState: state.frictionState,
+    frictionTargetTorque: state.frictionTargetTorque,
+    frictionSpeedRatio: state.frictionSpeedRatio,
+    frictionAssistBlend: state.frictionAssistBlend,
     velocityProportionalTorque: state.velocityProportionalTorque,
     anticoggingTorque: state.anticoggingTorque,
     finalTorque: state.finalTorque,
@@ -1426,6 +1437,11 @@ function bindActions() {
   ]));
   dom.scopePresetCurrentButton.addEventListener('click', () => applyScopePreset([
     'iqSetpoint', 'current', 'idSetpoint', 'idMeasured', 'finalTorque', 'abzVelocityTorqueSaturated',
+  ]));
+  dom.scopePresetLowSpeedButton.addEventListener('click', () => applyScopePreset([
+    'velocity', 'controlObserverVelocity', 'rawVelocity',
+    'frictionTargetTorque', 'lowSpeedTorque', 'frictionState',
+    'velocityProportionalTorque', 'velocityIntegratorTorque', 'iqSetpoint', 'current',
   ]));
   dom.scopeWindowSelect.addEventListener('change', () => {
     setScopeWindow(dom.scopeWindowSelect.value);

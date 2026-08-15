@@ -161,6 +161,11 @@ public:
     FrictionCompensator friction_compensator_;
     float low_speed_friction_torque_ = 0.0f;
     uint8_t low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
+    float friction_target_torque_ = 0.0f;
+    float friction_speed_ratio_ = 0.0f;
+    float friction_assist_blend_ = 0.0f;
+    float friction_no_progress_time_ = 0.0f;
+    float friction_recovery_timer_ = 0.0f;
     ControlVelocityObserver control_velocity_observer_;
     float control_observer_velocity_ = 0.0f;   // [turn/s]
     bool control_observer_valid_ = false;

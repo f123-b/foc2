@@ -207,7 +207,9 @@ export function parseFastTelemetry(line) {
     abzVelGain = 0, abzVelIntegratorGain = 0,
     controlVelocityObserverBandwidth = 0, abzVelocityTorqueLimit = 0,
     abzCoulombFrictionTorque = 0, abzBreakawayTorque = 0,
-    enableLowSpeedCompensation = 0] = values;
+    enableLowSpeedCompensation = 0,
+    frictionTargetTorque = 0, frictionSpeedRatio = 0, frictionAssistBlend = 0,
+    frictionNoProgressTime = 0, frictionRecoveryTimer = 0] = values;
   return {
     axisState: AXIS_STATE[state] ?? `状态 ${state}`,
     stateCode: state,
@@ -253,6 +255,11 @@ export function parseFastTelemetry(line) {
     abzCoulombFrictionTorque,
     abzBreakawayTorque,
     enableLowSpeedCompensation,
+    frictionTargetTorque,
+    frictionSpeedRatio,
+    frictionAssistBlend,
+    frictionNoProgressTime,
+    frictionRecoveryTimer,
   };
 }
 

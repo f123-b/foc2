@@ -114,6 +114,11 @@ void Controller::reset(bool abort_anticogging) {
     friction_compensator_.clear();
     low_speed_friction_torque_ = 0.0f;
     low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
+    friction_target_torque_ = 0.0f;
+    friction_speed_ratio_ = 0.0f;
+    friction_assist_blend_ = 0.0f;
+    friction_no_progress_time_ = 0.0f;
+    friction_recovery_timer_ = 0.0f;
     control_observer_velocity_ = 0.0f;
     control_observer_valid_ = false;
     position_error_ = 0.0f;
@@ -848,6 +853,11 @@ bool Controller::update(float* torque_setpoint_output) {
         // the rotor starts moving, leaving only the Coulomb term.
         low_speed_friction_torque_ = 0.0f;
         low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
+        friction_target_torque_ = 0.0f;
+        friction_speed_ratio_ = 0.0f;
+        friction_assist_blend_ = 0.0f;
+        friction_no_progress_time_ = 0.0f;
+        friction_recovery_timer_ = 0.0f;
         const bool abz_velocity_mode = cascaded_abz_mode &&
                 config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL;
         const bool friction_enabled =
@@ -865,6 +875,11 @@ bool Controller::update(float* torque_setpoint_output) {
                             current_meas_period);
             low_speed_friction_torque_ = compensation.friction_torque;
             low_speed_compensator_state_ = compensation.state;
+            friction_target_torque_ = compensation.target_torque;
+            friction_speed_ratio_ = compensation.speed_ratio;
+            friction_assist_blend_ = compensation.assist_blend;
+            friction_no_progress_time_ = compensation.no_progress_time;
+            friction_recovery_timer_ = compensation.recovery_timer;
         } else {
             // Graceful ramp-to-zero instead of a one-cycle torque step.
             low_speed_friction_torque_ =
