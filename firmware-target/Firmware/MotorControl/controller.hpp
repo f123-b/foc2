@@ -7,6 +7,7 @@
 
 #include "velocity_filter.hpp"
 #include "friction_compensator.hpp"
+#include "control_velocity_observer.hpp"
 
 class Controller : public ODriveIntf::ControllerIntf {
 public:
@@ -46,6 +47,12 @@ public:
         // Low-speed friction/breakaway feed-forward.  Defaults to off so the
         // ABZ velocity loop can be verified as a plain PI controller first.
         bool enable_low_speed_compensation = false;
+        // ABZ-specific velocity PI gains (the generic vel_gain/vel_integrator
+        // gain are not suitable for the 4000 CPR incremental encoder).
+        float abz_vel_gain = 0.02f;                  // [Nm/(turn/s)]
+        float abz_vel_integrator_gain = 0.05f;       // [Nm/(turn/s * s)]
+        // Bandwidth of the control velocity observer in Hz (tunable 20..80 Hz).
+        float control_velocity_observer_bandwidth = 30.0f;
         uint8_t axis_to_mirror = -1;
         float mirror_ratio = 1.0f;
         uint8_t load_encoder_axis = -1;  // default depends on Axis number and is set in load_configuration()
@@ -143,6 +150,9 @@ public:
     FrictionCompensator friction_compensator_;
     float low_speed_friction_torque_ = 0.0f;
     uint8_t low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
+    ControlVelocityObserver control_velocity_observer_;
+    float control_observer_velocity_ = 0.0f;   // [turn/s]
+    bool control_observer_valid_ = false;
     float position_error_ = 0.0f;
     bool position_low_speed_active_ = false;
 

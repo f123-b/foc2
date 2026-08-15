@@ -111,6 +111,8 @@ void Controller::reset(bool abort_anticogging) {
     friction_compensator_.clear();
     low_speed_friction_torque_ = 0.0f;
     low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
+    control_observer_velocity_ = 0.0f;
+    control_observer_valid_ = false;
     position_error_ = 0.0f;
     position_low_speed_active_ = false;
 }
@@ -123,21 +125,20 @@ void Controller::set_error(Error error) {
 float Controller::velocity_feedback_for_control(float raw_velocity,
                                                 float commanded_velocity) const {
     (void)commanded_velocity;
-    // ABZ velocity/position control uses the count-time estimator; every other
-    // feedback source (torque, sensorless, SPI) uses the PLL velocity directly.
-    if (cascaded_abz_control() &&
-            axis_->encoder_.incremental_velocity_estimator_.valid()) {
-        return axis_->encoder_.control_velocity_estimate_;
+    // ABZ velocity/position control closes on the low-bandwidth control
+    // observer; every other feedback source (torque, sensorless, SPI) uses the
+    // PLL velocity directly.
+    if (cascaded_abz_control() && control_observer_valid_) {
+        return control_observer_velocity_;
     }
     return raw_velocity;
 }
 
 float Controller::velocity_feedback_for_telemetry(float raw_velocity) const {
-    // ABZ telemetry reports the same count-time estimate that closed the loop,
-    // so the UI shows the mechanical speed the controller actually sees.
-    if (cascaded_abz_control() &&
-            axis_->encoder_.incremental_velocity_estimator_.valid()) {
-        return axis_->encoder_.control_velocity_estimate_;
+    // ABZ telemetry reports the observer velocity that closed the loop, so the
+    // UI shows the mechanical speed the controller actually saw.
+    if (cascaded_abz_control() && control_observer_valid_) {
+        return control_observer_velocity_;
     }
     return raw_velocity;
 }
@@ -732,11 +733,34 @@ bool Controller::update(float* torque_setpoint_output) {
     float vel_gain = config_.vel_gain;
     float vel_integrator_gain = config_.vel_integrator_gain;
 
-    // Standard velocity PI: Kp/Ki come straight from the configuration. The
-    // previous low-speed gain schedule (a hardcoded, wide transition) and the
-    // 50 ms window + LPF chain are removed; the count-time estimator supplies
-    // low-latency feedback so one fixed gain works across 0.2--2 turn/s.
     const bool cascaded_abz_mode = cascaded_abz_control();
+
+    // ABZ uses its own PI gains: the generic ODrive defaults are far too large
+    // for a 4000 CPR incremental encoder, so keep them tunable and independent.
+    if (cascaded_abz_mode) {
+        vel_gain = config_.abz_vel_gain;
+        vel_integrator_gain = config_.abz_vel_integrator_gain;
+    }
+
+    // Low-bandwidth control velocity observer. It tracks the raw ABZ count
+    // position and produces the smooth velocity the PI closes on. The M/T
+    // estimator is only a diagnostic, and the encoder PLL stays untouched for
+    // commutation / phase interpolation / safety.
+    if (cascaded_abz_mode) {
+        const float observer_position =
+                (float)axis_->encoder_.shadow_count_ /
+                        (float)std::max<int32_t>(1, axis_->encoder_.config_.cpr);
+        control_velocity_observer_.configure(
+                config_.control_velocity_observer_bandwidth);
+        if (!control_observer_valid_)
+            control_velocity_observer_.reset(observer_position);
+        control_observer_velocity_ = control_velocity_observer_.update(
+                observer_position, current_meas_period);
+        control_observer_valid_ = true;
+    } else {
+        control_observer_velocity_ = 0.0f;
+        control_observer_valid_ = false;
+    }
 
     if (axis_->motor_.config_.motor_type == Motor::MOTOR_TYPE_ACIM) {
         float effective_flux = axis_->motor_.current_control_.acim_rotor_flux;
@@ -815,54 +839,30 @@ bool Controller::update(float* torque_setpoint_output) {
         torque_unsaturated += proportional_torque + vel_integrator_torque_;
         velocity_loop_torque_ = proportional_torque + vel_integrator_torque_;
 
-        // Optional Coulomb-friction + static breakaway feed-forward. Disabled
-        // for the PI-only baseline and re-enabled only through the config flag.
+        // Coulomb-friction + static breakaway feed-forward. Disabled for the
+        // PI-only baseline; re-enabled only through the config flag.
         low_speed_friction_torque_ = 0.0f;
         low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
-        // Coulomb-friction + static breakaway feed-forward. Disabled for the
-        // PI-only baseline; re-enabled by config, or automatically during
-        // position-hold cogging calibration (which must cross teeth).
-        const bool position_hold_calibration = cascaded_abz_mode &&
-                config_.anticogging.calib_anticogging &&
-                !anticogging_velocity_only_ &&
-                config_.control_mode == CONTROL_MODE_POSITION_CONTROL;
-        const bool friction_enabled = cascaded_abz_mode &&
-                (config_.enable_low_speed_compensation || position_hold_calibration);
-        if (friction_enabled) {
-            float ff_command = vel_des;
-            float ff_error = v_err;
-            bool ff_active = std::abs(ff_command) >=
-                    FrictionCompensator::command_threshold;
-            if (position_hold_calibration) {
-                // The position loop commands a near-zero velocity at a tooth,
-                // so drive the breakaway from the position-error direction.
-                const float settle_turn = config_.anticogging.calib_pos_threshold /
-                        (float)axis_->encoder_.config_.cpr;
-                if (std::abs(pos_err) <= settle_turn) {
-                    ff_active = false;  // settled: let the PI integrator hold
-                } else {
-                    const float direction = pos_err > 0.0f ? 1.0f : -1.0f;
-                    ff_command = direction * 0.05f;
-                    ff_error = direction * 0.2f;
-                    ff_active = true;
-                }
-            }
-            if (ff_active) {
-                const FrictionCompensationResult compensation =
-                        friction_compensator_.update(
-                                true, ff_command, velocity_feedback, ff_error,
-                                axis_->encoder_.shadow_count_,
-                                current_meas_period);
-                low_speed_friction_torque_ = compensation.friction_torque;
-                low_speed_compensator_state_ = compensation.state;
-                torque_unsaturated += low_speed_friction_torque_;
-            } else {
-                friction_compensator_.clear();
-            }
+        const bool friction_enabled =
+                cascaded_abz_mode && config_.enable_low_speed_compensation;
+        const bool ff_active = friction_enabled &&
+                std::abs(vel_des) >= FrictionCompensator::command_threshold;
+        if (ff_active) {
+            const FrictionCompensationResult compensation =
+                    friction_compensator_.update(
+                            true, vel_des, velocity_feedback, v_err,
+                            axis_->encoder_.shadow_count_,
+                            current_meas_period);
+            low_speed_friction_torque_ = compensation.friction_torque;
+            low_speed_compensator_state_ = compensation.state;
         } else {
-            friction_compensator_.clear();
+            // Graceful ramp-to-zero instead of a one-cycle torque step.
+            low_speed_friction_torque_ =
+                    friction_compensator_.disable(current_meas_period);
+            low_speed_compensator_state_ = friction_compensator_.state();
             position_low_speed_active_ = false;
         }
+        torque_unsaturated += low_speed_friction_torque_;
     } else {
         abz_velocity_feedback_filter_.clear();
         velocity_control_feedback_valid_ = false;

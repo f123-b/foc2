@@ -538,9 +538,11 @@ bool Encoder::update() {
 
     // Count-time estimator used only by the velocity/position controller.
     if (mode_ == MODE_INCREMENTAL) {
+        last_delta_count_ = delta_enc;
         control_velocity_estimate_ = incremental_velocity_estimator_.update(
                 delta_enc, current_meas_period, (float)config_.cpr);
     } else {
+        last_delta_count_ = 0;
         incremental_velocity_estimator_.reset();
         control_velocity_estimate_ = 0.0f;
     }

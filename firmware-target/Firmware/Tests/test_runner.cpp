@@ -14,6 +14,7 @@
 #include <communication/can_helpers.hpp>
 #include <incremental_velocity_estimator.hpp>
 #include <friction_compensator.hpp>
+#include <control_velocity_observer.hpp>
 #include <velocity_filter.hpp>
 
 using std::cout;
@@ -215,15 +216,20 @@ TEST_SUITE("friction_compensator") {
         CHECK(result.friction_torque <= 0.0f);
     }
 
-    TEST_CASE("zero command clears immediately") {
+    TEST_CASE("zero command gracefully ramps out") {
         FrictionCompensator compensator;
         for (int i = 0; i < 4000; ++i) {
             compensator.update(true, 0.2f, 0.2f, 0.0f, i / 10, dt);
         }
+        const float before = compensator.friction_torque();
+        CHECK(before > 0.0f);
+        // A single zero-command cycle must not hard-jump to zero; it marks the
+        // compensator idle and begins a graceful ramp-out.
         const auto result = compensator.update(
                 false, 0.0f, 0.0f, 0.0f, 0, dt);
-        CHECK(result.friction_torque == 0.0f);
-        CHECK(compensator.state() == FrictionCompensator::STATE_IDLE);
+        CHECK(result.state == FrictionCompensator::STATE_IDLE);
+        CHECK(result.friction_torque < before);
+        CHECK(result.friction_torque > 0.0f);
     }
 
     TEST_CASE("isolated count dither does not reset the stall timer") {
@@ -236,6 +242,106 @@ TEST_SUITE("friction_compensator") {
                     true, 0.2f, 0.0f, 0.2f, count, dt);
         }
         CHECK(result.state == FrictionCompensator::STATE_BREAKAWAY);
+    }
+
+    TEST_CASE("breakaway ramp is symmetric between + and - direction") {
+        // Same number of stalled cycles in each direction must reach the same
+        // torque magnitude. The old target>=value slew used the fall rate for
+        // every negative move, making negative ramps much faster.
+        FrictionCompensator positive;
+        for (int i = 0; i < 600; ++i)
+            positive.update(true, 0.2f, 0.0f, 0.2f, 0, dt);
+
+        FrictionCompensator negative;
+        for (int i = 0; i < 600; ++i)
+            negative.update(true, -0.2f, 0.0f, -0.2f, 0, dt);
+
+        CHECK(negative.friction_torque() == doctest::Approx(
+                -positive.friction_torque()).epsilon(0.01f));
+    }
+
+    TEST_CASE("disable ramps to zero instead of stepping") {
+        FrictionCompensator compensator;
+        for (int i = 0; i < 12000; ++i)
+            compensator.update(true, 0.2f, 0.0f, 0.2f, 0, dt);
+        const float before = compensator.friction_torque();
+        CHECK(before == doctest::Approx(
+                FrictionCompensator::breakaway_torque).epsilon(0.02f));
+
+        // One disable cycle must not jump to zero.
+        const float after_one = compensator.disable(dt);
+        CHECK(std::abs(after_one) > 0.0f);
+        CHECK(std::abs(after_one) < std::abs(before));
+
+        // Over many cycles it decays to zero.
+        float v = after_one;
+        for (int i = 0; i < 4000; ++i)
+            v = compensator.disable(dt);
+        CHECK(std::abs(v) < 0.0002f);
+    }
+}
+
+TEST_SUITE("control_velocity_observer") {
+    constexpr float dt = 0.000125f;
+
+    float run_constant_speed(ControlVelocityObserver& obs, float speed,
+                             int cycles) {
+        double pos = 0.0;
+        float v = 0.0f;
+        for (int i = 0; i < cycles; ++i) {
+            pos += (double)speed * (double)dt;
+            v = obs.update((float)pos, dt);
+        }
+        return v;
+    }
+
+    TEST_CASE("converges to a constant speed") {
+        ControlVelocityObserver obs;
+        obs.configure(30.0f);
+        obs.reset(0.0f);
+        CHECK(run_constant_speed(obs, 1.0f, 8000) ==
+                doctest::Approx(1.0f).epsilon(0.01f));
+    }
+
+    TEST_CASE("smooths quantized count input without staircase ripple") {
+        ControlVelocityObserver obs;
+        obs.configure(30.0f);
+        obs.reset(0.0f);
+        // Feed integer-count position (0.00025 turn per count at 4000 CPR)
+        // while the rotor moves at 1 turn/s. The observer output must not
+        // reproduce the count staircase.
+        double pos_counts = 0.0;
+        float v = 0.0f;
+        float max_v = 0.0f, min_v = 1e9f;
+        for (int i = 0; i < 16000; ++i) {
+            pos_counts += 1.0 * 4000.0 * (double)dt;
+            const int32_t count = (int32_t)std::floor(pos_counts);
+            v = obs.update((float)count / 4000.0f, dt);
+            if (i > 2000) {
+                max_v = std::max(max_v, v);
+                min_v = std::min(min_v, v);
+            }
+        }
+        CHECK(v == doctest::Approx(1.0f).epsilon(0.01f));
+        // Peak-to-peak ripple far below a single-count step (~0.125 turn/s
+        // over 2 ms).
+        CHECK(max_v - min_v < 0.05f);
+    }
+
+    TEST_CASE("tracks negative speed") {
+        ControlVelocityObserver obs;
+        obs.configure(30.0f);
+        obs.reset(0.0f);
+        CHECK(run_constant_speed(obs, -1.0f, 8000) ==
+                doctest::Approx(-1.0f).epsilon(0.01f));
+    }
+
+    TEST_CASE("reset produces no startup spike") {
+        ControlVelocityObserver obs;
+        obs.configure(30.0f);
+        obs.reset(0.0f);
+        const float v = obs.update(0.0f, dt);
+        CHECK(v == 0.0f);
     }
 }
 

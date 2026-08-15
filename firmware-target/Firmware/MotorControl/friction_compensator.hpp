@@ -60,6 +60,14 @@ public:
         breakaway_start_count_ = 0;
     }
 
+    // Graceful ramp-to-zero for a normal disable (config toggle / zero
+    // command). Hard clear() is reserved for fault / estop / closed-loop exit.
+    float disable(float period) {
+        const FrictionCompensationResult r =
+                update(false, 0.0f, 0.0f, 0.0f, 0, period);
+        return r.friction_torque;
+    }
+
     FrictionCompensationResult update(bool active,
                                       float command_velocity,
                                       float measured_velocity,
@@ -67,14 +75,33 @@ public:
                                       int32_t encoder_count,
                                       float period) {
         FrictionCompensationResult result;
-        const float direction = command_velocity > 0.0f ? 1.0f :
-                command_velocity < 0.0f ? -1.0f : 0.0f;
-        if (!active || !(period > 0.0f) || direction == 0.0f ||
-                !std::isfinite(command_velocity) ||
+        const bool bad_input = !std::isfinite(command_velocity) ||
                 !std::isfinite(measured_velocity) ||
-                !std::isfinite(velocity_error)) {
+                !std::isfinite(velocity_error);
+        if (bad_input || !(period > 0.0f)) {
+            // No valid time step to slew with: only a hard reset is possible.
             clear();
             result.friction_torque = 0.0f;
+            result.state = state_;
+            return result;
+        }
+        const float direction = command_velocity > 0.0f ? 1.0f :
+                command_velocity < 0.0f ? -1.0f : 0.0f;
+        if (!active || direction == 0.0f) {
+            // Graceful ramp-to-zero: never step the output to zero in a single
+            // control cycle. Hard clear() is reserved for fault / estop / exit
+            // from closed loop.
+            output_ = slew(output_, 0.0f, period);
+            if (std::abs(output_) < 0.0001f) {
+                clear();
+            } else {
+                state_ = STATE_IDLE;
+                direction_ = 0.0f;
+                no_progress_time_ = 0.0f;
+                recovery_confirm_timer_ = 0.0f;
+                initialized_ = false;
+            }
+            result.friction_torque = output_;
             result.state = state_;
             return result;
         }
@@ -166,7 +193,11 @@ public:
 
 private:
     float slew(float value, float target, float period) {
-        const float rate = target >= value ? torque_rise_rate : torque_fall_rate;
+        // Rise/fall is selected by torque MAGNITUDE so +direction and
+        // -direction behave symmetrically (the old target>=value comparison
+        // used the fall rate for every negative-direction move).
+        const float rate = std::abs(target) >= std::abs(value)
+                ? torque_rise_rate : torque_fall_rate;
         const float step = rate * period;
         return value + std::clamp(target - value, -step, step);
     }

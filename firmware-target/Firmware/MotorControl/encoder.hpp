@@ -98,7 +98,8 @@ public:
     // Count-time estimator for the velocity/position controller only.  The PLL
     // state above continues to drive commutation and phase interpolation.
     IncrementalVelocityEstimator incremental_velocity_estimator_;
-    float control_velocity_estimate_ = 0.0f;  // [turn/s]
+    float control_velocity_estimate_ = 0.0f;  // [turn/s] (M/T diagnostic)
+    int32_t last_delta_count_ = 0;             // per-cycle count delta
     float pll_kp_ = 0.0f;   // [count/s / count]
     float pll_ki_ = 0.0f;   // [(count/s^2) / count]
     float calib_scan_response_ = 0.0f; // debug report from offset calib
