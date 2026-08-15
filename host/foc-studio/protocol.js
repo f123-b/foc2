@@ -199,9 +199,13 @@ export function parseFastTelemetry(line) {
     velocityProportionalTorque = 0, anticoggingTorque = 0,
     finalTorque = 0, maxAvailableTorque = 0,
     mTVelocity = velocity, velocityError = 0,
-    torqueUnsaturated = 0, torqueSaturated = 0, encoderEdgeAge = 0,
+    torqueUnsaturated = 0, motorTorqueSaturated = 0, encoderEdgeAge = 0,
     controlObserverVelocity = velocity, encoderDeltaCount = 0,
-    encoderShadowCount = 0] = values;
+    encoderShadowCount = 0,
+    abzVelocityTorqueBeforeLimit = 0, abzVelocityTorqueAfterLimit = 0,
+    abzVelocityTorqueSaturated = 0,
+    abzVelGain = 0, abzVelIntegratorGain = 0,
+    controlVelocityObserverBandwidth = 0, abzVelocityTorqueLimit = 0] = values;
   return {
     axisState: AXIS_STATE[state] ?? `状态 ${state}`,
     stateCode: state,
@@ -230,11 +234,18 @@ export function parseFastTelemetry(line) {
     mTVelocity,
     velocityError,
     torqueUnsaturated,
-    torqueSaturated,
+    motorTorqueSaturated,
     encoderEdgeAge,
     controlObserverVelocity,
     encoderDeltaCount,
     encoderShadowCount,
+    abzVelocityTorqueBeforeLimit,
+    abzVelocityTorqueAfterLimit,
+    abzVelocityTorqueSaturated,
+    abzVelGain,
+    abzVelIntegratorGain,
+    controlVelocityObserverBandwidth,
+    abzVelocityTorqueLimit,
   };
 }
 

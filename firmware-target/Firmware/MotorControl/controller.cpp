@@ -107,7 +107,10 @@ void Controller::reset(bool abort_anticogging) {
     final_torque_ = 0.0f;
     velocity_error_ = 0.0f;
     torque_unsaturated_ = 0.0f;
-    torque_saturated_ = false;
+    motor_torque_saturated_ = false;
+    abz_velocity_torque_before_limit_ = 0.0f;
+    abz_velocity_torque_after_limit_ = 0.0f;
+    abz_velocity_torque_saturated_ = false;
     friction_compensator_.clear();
     low_speed_friction_torque_ = 0.0f;
     low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
@@ -875,6 +878,28 @@ bool Controller::update(float* torque_setpoint_output) {
         position_low_speed_active_ = false;
     }
 
+    // ABZ velocity-loop torque limit (separate from the motor global limit).
+    // P + I + FF is recorded, then clamped symmetrically before the global
+    // motor torque limit applies.
+    float torque_pre_abz_limit = torque_unsaturated;
+    if (cascaded_abz_mode) {
+        abz_velocity_torque_before_limit_ = torque_unsaturated;
+        const float abz_lim = config_.abz_velocity_torque_limit;
+        if (std::isfinite(abz_lim) && abz_lim > 0.0f) {
+            const float clamped = std::clamp(torque_unsaturated, -abz_lim, abz_lim);
+            abz_velocity_torque_after_limit_ = clamped;
+            abz_velocity_torque_saturated_ = (clamped != torque_unsaturated);
+            torque_unsaturated = clamped;
+        } else {
+            abz_velocity_torque_after_limit_ = torque_unsaturated;
+            abz_velocity_torque_saturated_ = false;
+        }
+    } else {
+        abz_velocity_torque_before_limit_ = 0.0f;
+        abz_velocity_torque_after_limit_ = 0.0f;
+        abz_velocity_torque_saturated_ = false;
+    }
+
     torque = torque_unsaturated;
 
     // Velocity limiting in current mode
@@ -899,18 +924,26 @@ bool Controller::update(float* torque_setpoint_output) {
         torque = -Tlim;
     }
     torque_unsaturated_ = torque_unsaturated;
-    torque_saturated_ = limited;
+    motor_torque_saturated_ = limited;
 
     // Velocity integrator: conditional anti-windup. The integrator only
-    // advances when the total torque is not already saturated in the direction
-    // the velocity error is pushing it, and it releases as soon as the error
+    // advances when the torque is not already saturated in the direction the
+    // velocity error is pushing it, and it releases as soon as the error
     // reverses sign.
     if (config_.control_mode < CONTROL_MODE_VELOCITY_CONTROL) {
         // reset integral if not in use
         vel_integrator_torque_ = 0.0f;
     } else {
-        const bool saturated_high = torque_unsaturated > Tlim;
-        const bool saturated_low = torque_unsaturated < -Tlim;
+        // Tightest active limit: the ABZ velocity torque limit and the motor
+        // global torque limit both count toward windup.
+        float effective_limit = Tlim;
+        if (cascaded_abz_mode) {
+            const float abz_lim = config_.abz_velocity_torque_limit;
+            if (std::isfinite(abz_lim) && abz_lim > 0.0f)
+                effective_limit = std::min(abz_lim, Tlim);
+        }
+        const bool saturated_high = torque_pre_abz_limit > effective_limit;
+        const bool saturated_low = torque_pre_abz_limit < -effective_limit;
         const bool windup_forward = saturated_high && v_err > 0.0f;
         const bool windup_reverse = saturated_low && v_err < 0.0f;
         if (!windup_forward && !windup_reverse) {
@@ -918,10 +951,10 @@ bool Controller::update(float* torque_setpoint_output) {
                     (vel_integrator_gain * gain_scheduling_multiplier) *
                     v_err * current_meas_period;
         }
-        // Bound the integrator to the available torque so a long saturated
+        // Bound the integrator to the tightest active limit so a saturated
         // transient cannot store a large torque to release later.
         vel_integrator_torque_ = std::clamp(
-                vel_integrator_torque_, -Tlim, Tlim);
+                vel_integrator_torque_, -effective_limit, effective_limit);
     }
 
     final_torque_ = torque;

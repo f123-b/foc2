@@ -51,7 +51,12 @@ assert.deepEqual(parseFastTelemetry('! 8 1.25 -0.3 2.5 12.2 1 -0.2 -0.8 0.01 -0.
   velocityIntegratorTorque: 0, lowSpeedTorque: 0,
   positionSetpoint: 2.5, positionError: 0, lowSpeedState: 0,
   velocityProportionalTorque: 0, anticoggingTorque: 0, finalTorque: 0,
-  maxAvailableTorque: 0,
+  maxAvailableTorque: 0, mTVelocity: 1.25, velocityError: 0,
+  torqueUnsaturated: 0, motorTorqueSaturated: 0, encoderEdgeAge: 0,
+  controlObserverVelocity: 1.25, encoderDeltaCount: 0, encoderShadowCount: 0,
+  abzVelocityTorqueBeforeLimit: 0, abzVelocityTorqueAfterLimit: 0,
+  abzVelocityTorqueSaturated: 0, abzVelGain: 0, abzVelIntegratorGain: 0,
+  controlVelocityObserverBandwidth: 0, abzVelocityTorqueLimit: 0,
 });
 const controlTelemetry = parseFastTelemetry('! 8 0.2 0.3 2.5 12.2 1 -0.2 -0.8 0.01 0.25 0 0.2 0.35 0.175 0.0015 0.003 2.55 0.05 2 0.0004 -0.0008 0.0041 0.0254');
 assert.equal(controlTelemetry.velocitySetpoint, 0.2);

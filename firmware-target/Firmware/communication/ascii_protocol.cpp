@@ -379,7 +379,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float v_beta = power_stage_active ? current_control.final_v_beta : 0.0f;
             axis->watchdog_feed();
             respond(response_channel, use_checksum,
-                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld",
+                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g",
                     (unsigned)axis->current_state_, (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
                     (double)v_alpha,
@@ -402,11 +402,18 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (double)axis->encoder_.control_velocity_estimate_,
                     (double)axis->controller_.velocity_error_,
                     (double)axis->controller_.torque_unsaturated_,
-                    (unsigned)axis->controller_.torque_saturated_,
+                    (unsigned)axis->controller_.motor_torque_saturated_,
                     (double)axis->encoder_.incremental_velocity_estimator_.time_since_last_edge(),
                     (double)axis->controller_.control_observer_velocity_,
                     (long)axis->encoder_.last_delta_count_,
-                    (long)axis->encoder_.shadow_count_);
+                    (long)axis->encoder_.shadow_count_,
+                    (double)axis->controller_.abz_velocity_torque_before_limit_,
+                    (double)axis->controller_.abz_velocity_torque_after_limit_,
+                    (unsigned)axis->controller_.abz_velocity_torque_saturated_,
+                    (double)axis->controller_.config_.abz_vel_gain,
+                    (double)axis->controller_.config_.abz_vel_integrator_gain,
+                    (double)axis->controller_.config_.control_velocity_observer_bandwidth,
+                    (double)axis->controller_.config_.abz_velocity_torque_limit);
         }
 
     } else if (cmd[0] == 'j') { // FOC Studio aggregate telemetry

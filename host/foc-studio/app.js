@@ -38,10 +38,18 @@ const state = {
   mTVelocity: 0,
   velocityError: 0,
   torqueUnsaturated: 0,
-  torqueSaturated: 0,
+  motorTorqueSaturated: 0,
   encoderEdgeAge: 0,
   controlObserverVelocity: 0,
   encoderDeltaCount: 0,
+  encoderShadowCount: 0,
+  abzVelocityTorqueBeforeLimit: 0,
+  abzVelocityTorqueAfterLimit: 0,
+  abzVelocityTorqueSaturated: 0,
+  abzVelGain: 0,
+  abzVelIntegratorGain: 0,
+  controlVelocityObserverBandwidth: 0,
+  abzVelocityTorqueLimit: 0,
   observerLocked: false,
   angleError: 0,
   motorError: 0,
@@ -80,6 +88,7 @@ const dom = Object.fromEntries([
   'mobileViewSelect', 'pwmStatus', 'watchdogStatus', 'currentStatus', 'controlReadyStatus',
   'currentModeBadge', 'safeProfileButton', 'scopeRunButton', 'scopeClearButton',
   'scopeAutoScaleButton', 'scopeWindowSelect', 'scopeCaptureState', 'scopeSampleRate',
+  'scopePresetVelocityButton', 'scopePresetCurrentButton',
   'scopeWindowLabel', 'scopeWindowEndLabel', 'scopeRunIndicator', 'scopeAxisMin',
   'scopeAxisMax', 'scopeAxisApplyButton', 'scopeAxisResetButton', 'scopeMeasurements',
   'scopeSelectionBox', 'scopeCursorTooltip', 'consoleChartLegend',
@@ -99,6 +108,10 @@ const foc3505Tuning = Object.freeze({
   'axis0.controller.config.vel_ramp_rate': '0.3',
   'axis0.motor.config.current_control_bandwidth': '500',
   'axis0.encoder.config.bandwidth': '100',
+  'axis0.controller.config.abz_vel_gain': '0.002',
+  'axis0.controller.config.abz_vel_integrator_gain': '0',
+  'axis0.controller.config.control_velocity_observer_bandwidth': '40',
+  'axis0.controller.config.abz_velocity_torque_limit': '0.015',
 });
 writableConfigInputs.forEach((input) => {
   if (foc3505Tuning[input.dataset.config] !== undefined) {
@@ -856,6 +869,9 @@ const chartSeries = Object.freeze({
   anticoggingTorque: { label: '齿槽补偿转矩', color: '#0f9f6e', floor: 0.001, unit: 'Nm' },
   finalTorque: { label: '最终转矩', color: '#444ce7', floor: 0.001, unit: 'Nm' },
   torqueUnsaturated: { label: '未饱和转矩', color: '#f97316', floor: 0.001, unit: 'Nm' },
+  abzVelocityTorqueBeforeLimit: { label: 'ABZ 转矩限幅前', color: '#d946ef', floor: 0.001, unit: 'Nm' },
+  abzVelocityTorqueAfterLimit: { label: 'ABZ 转矩限幅后', color: '#fb7185', floor: 0.001, unit: 'Nm' },
+  abzVelocityTorqueSaturated: { label: 'ABZ 转矩饱和', color: '#ef4444', floor: 0.001, unit: '' },
   current: { label: 'Iq 测量', color: '#d07a00', floor: 0.1, unit: 'A' },
   iqSetpoint: { label: 'Iq 给定', color: '#efb118', floor: 0.1, unit: 'A' },
   idMeasured: { label: 'Id 测量', color: '#06a67a', floor: 0.05, unit: 'A' },
@@ -888,6 +904,9 @@ function captureTelemetrySample() {
     anticoggingTorque: state.anticoggingTorque,
     finalTorque: state.finalTorque,
     torqueUnsaturated: state.torqueUnsaturated,
+    abzVelocityTorqueBeforeLimit: state.abzVelocityTorqueBeforeLimit,
+    abzVelocityTorqueAfterLimit: state.abzVelocityTorqueAfterLimit,
+    abzVelocityTorqueSaturated: state.abzVelocityTorqueSaturated,
     current: state.current,
     iqSetpoint: state.iqSetpoint,
     idMeasured: state.idMeasured,
@@ -1385,6 +1404,20 @@ function bindActions() {
     else scopeAutoScale = true;
     updateScopeControls();
   });
+  function applyScopePreset(keys) {
+    scopeChannels.forEach((input) => {
+      input.checked = keys.includes(input.dataset.scopeKey);
+    });
+    if (!scopeRunning) scopePausedAt = performance.now();
+    drawCharts();
+  }
+  dom.scopePresetVelocityButton.addEventListener('click', () => applyScopePreset([
+    'velocity', 'controlObserverVelocity', 'rawVelocity', 'velocityError',
+    'velocityProportionalTorque', 'velocityIntegratorTorque', 'abzVelocityTorqueAfterLimit',
+  ]));
+  dom.scopePresetCurrentButton.addEventListener('click', () => applyScopePreset([
+    'iqSetpoint', 'current', 'idSetpoint', 'idMeasured', 'finalTorque', 'abzVelocityTorqueSaturated',
+  ]));
   dom.scopeWindowSelect.addEventListener('change', () => {
     setScopeWindow(dom.scopeWindowSelect.value);
   });
