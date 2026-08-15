@@ -205,7 +205,9 @@ export function parseFastTelemetry(line) {
     abzVelocityTorqueBeforeLimit = 0, abzVelocityTorqueAfterLimit = 0,
     abzVelocityTorqueSaturated = 0,
     abzVelGain = 0, abzVelIntegratorGain = 0,
-    controlVelocityObserverBandwidth = 0, abzVelocityTorqueLimit = 0] = values;
+    controlVelocityObserverBandwidth = 0, abzVelocityTorqueLimit = 0,
+    abzCoulombFrictionTorque = 0, abzBreakawayTorque = 0,
+    enableLowSpeedCompensation = 0] = values;
   return {
     axisState: AXIS_STATE[state] ?? `状态 ${state}`,
     stateCode: state,
@@ -224,9 +226,11 @@ export function parseFastTelemetry(line) {
     windowVelocity,
     velocityIntegratorTorque,
     lowSpeedTorque,
+    frictionTorque: lowSpeedTorque,
     positionSetpoint,
     positionError,
     lowSpeedState,
+    frictionState: lowSpeedState,
     velocityProportionalTorque,
     anticoggingTorque,
     finalTorque,
@@ -246,6 +250,9 @@ export function parseFastTelemetry(line) {
     abzVelIntegratorGain,
     controlVelocityObserverBandwidth,
     abzVelocityTorqueLimit,
+    abzCoulombFrictionTorque,
+    abzBreakawayTorque,
+    enableLowSpeedCompensation,
   };
 }
 

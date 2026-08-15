@@ -842,12 +842,19 @@ bool Controller::update(float* torque_setpoint_output) {
         torque_unsaturated += proportional_torque + vel_integrator_torque_;
         velocity_loop_torque_ = proportional_torque + vel_integrator_torque_;
 
-        // Coulomb-friction + static breakaway feed-forward. Disabled for the
-        // PI-only baseline; re-enabled only through the config flag.
+        // Coulomb-friction + static breakaway feed-forward. Only for ABZ
+        // incremental encoder in velocity control (never torque / SPI /
+        // sensorless / position hold). The breakaway torque must exit after
+        // the rotor starts moving, leaving only the Coulomb term.
         low_speed_friction_torque_ = 0.0f;
         low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
+        const bool abz_velocity_mode = cascaded_abz_mode &&
+                config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL;
         const bool friction_enabled =
-                cascaded_abz_mode && config_.enable_low_speed_compensation;
+                abz_velocity_mode && config_.enable_low_speed_compensation;
+        friction_compensator_.configure(
+                config_.abz_coulomb_friction_torque,
+                config_.abz_breakaway_torque);
         const bool ff_active = friction_enabled &&
                 std::abs(vel_des) >= FrictionCompensator::command_threshold;
         if (ff_active) {

@@ -44,18 +44,22 @@ public:
         bool enable_vel_limit = true;
         bool enable_overspeed_error = true;
         bool enable_current_mode_vel_limit = true;  // enable velocity limit in current control mode (requires a valid velocity estimator)
-        // Low-speed friction/breakaway feed-forward.  Defaults to off so the
-        // ABZ velocity loop can be verified as a plain PI controller first.
-        bool enable_low_speed_compensation = false;
+        // Low-speed friction/breakaway feed-forward. Enabled for the ABZ
+        // velocity loop so static friction can be broken without raising Kp.
+        bool enable_low_speed_compensation = true;
         // ABZ-specific velocity PI gains (the generic vel_gain/vel_integrator
         // gain are not suitable for the 4000 CPR incremental encoder).
         float abz_vel_gain = 0.002f;                 // [Nm/(turn/s)]
-        float abz_vel_integrator_gain = 0.0f;        // [Nm/(turn/s * s)]
+        float abz_vel_integrator_gain = 0.002f;      // [Nm/(turn/s * s)]
         // Bandwidth of the control velocity observer in Hz (tunable 20..80 Hz).
         float control_velocity_observer_bandwidth = 40.0f;
         // ABZ velocity-loop torque limit [Nm], applied to P+I+FF before the
         // motor global torque limit. <= 0 or non-finite disables it.
         float abz_velocity_torque_limit = 0.015f;
+        // Coulomb/dynamic friction feed-forward and static breakaway torque
+        // [Nm] for the ABZ velocity loop. breakaway >= coulomb is enforced.
+        float abz_coulomb_friction_torque = 0.0015f;
+        float abz_breakaway_torque = 0.0055f;
         uint8_t axis_to_mirror = -1;
         float mirror_ratio = 1.0f;
         uint8_t load_encoder_axis = -1;  // default depends on Axis number and is set in load_configuration()

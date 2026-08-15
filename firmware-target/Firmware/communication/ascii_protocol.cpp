@@ -379,7 +379,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float v_beta = power_stage_active ? current_control.final_v_beta : 0.0f;
             axis->watchdog_feed();
             respond(response_channel, use_checksum,
-                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g",
+                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u",
                     (unsigned)axis->current_state_, (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
                     (double)v_alpha,
@@ -413,7 +413,10 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (double)axis->controller_.config_.abz_vel_gain,
                     (double)axis->controller_.config_.abz_vel_integrator_gain,
                     (double)axis->controller_.config_.control_velocity_observer_bandwidth,
-                    (double)axis->controller_.config_.abz_velocity_torque_limit);
+                    (double)axis->controller_.config_.abz_velocity_torque_limit,
+                    (double)axis->controller_.config_.abz_coulomb_friction_torque,
+                    (double)axis->controller_.config_.abz_breakaway_torque,
+                    (unsigned)axis->controller_.config_.enable_low_speed_compensation);
         }
 
     } else if (cmd[0] == 'j') { // FOC Studio aggregate telemetry

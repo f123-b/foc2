@@ -50,6 +50,9 @@ const state = {
   abzVelIntegratorGain: 0,
   controlVelocityObserverBandwidth: 0,
   abzVelocityTorqueLimit: 0,
+  abzCoulombFrictionTorque: 0,
+  abzBreakawayTorque: 0,
+  enableLowSpeedCompensation: 0,
   observerLocked: false,
   angleError: 0,
   motorError: 0,
@@ -109,9 +112,12 @@ const foc3505Tuning = Object.freeze({
   'axis0.motor.config.current_control_bandwidth': '500',
   'axis0.encoder.config.bandwidth': '100',
   'axis0.controller.config.abz_vel_gain': '0.002',
-  'axis0.controller.config.abz_vel_integrator_gain': '0',
+  'axis0.controller.config.abz_vel_integrator_gain': '0.002',
   'axis0.controller.config.control_velocity_observer_bandwidth': '40',
   'axis0.controller.config.abz_velocity_torque_limit': '0.015',
+  'axis0.controller.config.abz_coulomb_friction_torque': '0.0015',
+  'axis0.controller.config.abz_breakaway_torque': '0.0055',
+  'axis0.controller.config.enable_low_speed_compensation': '1',
 });
 writableConfigInputs.forEach((input) => {
   if (foc3505Tuning[input.dataset.config] !== undefined) {
@@ -864,7 +870,8 @@ const chartSeries = Object.freeze({
   positionError: { label: '位置误差', color: '#c2418c', floor: 0.001, unit: 'turn' },
   velocityIntegratorTorque: { label: '速度积分转矩', color: '#7a5af8', floor: 0.001, unit: 'Nm' },
   velocityError: { label: '速度误差', color: '#0ea5e9', floor: 0.01, unit: 'turn/s' },
-  lowSpeedTorque: { label: '低速补偿转矩', color: '#b45309', floor: 0.001, unit: 'Nm' },
+  lowSpeedTorque: { label: '摩擦转矩', color: '#b45309', floor: 0.001, unit: 'Nm' },
+  frictionState: { label: '摩擦状态', color: '#8b5cf6', floor: 0.001, unit: '' },
   velocityProportionalTorque: { label: '速度 P 转矩', color: '#9354c7', floor: 0.001, unit: 'Nm' },
   anticoggingTorque: { label: '齿槽补偿转矩', color: '#0f9f6e', floor: 0.001, unit: 'Nm' },
   finalTorque: { label: '最终转矩', color: '#444ce7', floor: 0.001, unit: 'Nm' },
@@ -900,6 +907,7 @@ function captureTelemetrySample() {
     velocityIntegratorTorque: state.velocityIntegratorTorque,
     velocityError: state.velocityError,
     lowSpeedTorque: state.lowSpeedTorque,
+    frictionState: state.frictionState,
     velocityProportionalTorque: state.velocityProportionalTorque,
     anticoggingTorque: state.anticoggingTorque,
     finalTorque: state.finalTorque,
@@ -1412,8 +1420,9 @@ function bindActions() {
     drawCharts();
   }
   dom.scopePresetVelocityButton.addEventListener('click', () => applyScopePreset([
-    'velocity', 'controlObserverVelocity', 'rawVelocity', 'velocityError',
-    'velocityProportionalTorque', 'velocityIntegratorTorque', 'abzVelocityTorqueAfterLimit',
+    'velocity', 'controlObserverVelocity', 'rawVelocity',
+    'velocityProportionalTorque', 'velocityIntegratorTorque', 'lowSpeedTorque',
+    'abzVelocityTorqueAfterLimit',
   ]));
   dom.scopePresetCurrentButton.addEventListener('click', () => applyScopePreset([
     'iqSetpoint', 'current', 'idSetpoint', 'idMeasured', 'finalTorque', 'abzVelocityTorqueSaturated',

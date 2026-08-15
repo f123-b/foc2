@@ -139,6 +139,8 @@ TEST_SUITE("velocity_feedback_filter") {
 
 TEST_SUITE("friction_compensator") {
     constexpr float dt = 0.000125f;
+    constexpr float coulomb_torque = 0.0015f;
+    constexpr float breakaway_torque = 0.0055f;
 
     TEST_CASE("running applies coulomb feed-forward in the command direction") {
         FrictionCompensator compensator;
@@ -149,7 +151,7 @@ TEST_SUITE("friction_compensator") {
         }
         CHECK(result.state == FrictionCompensator::STATE_RUNNING);
         CHECK(result.friction_torque == doctest::Approx(
-                FrictionCompensator::coulomb_torque).epsilon(0.02f));
+                coulomb_torque).epsilon(0.02f));
     }
 
     TEST_CASE("feed-forward fades toward zero near zero command") {
@@ -160,7 +162,7 @@ TEST_SUITE("friction_compensator") {
                     true, 0.005f, 0.005f, 0.0f, i / 10, dt);
         }
         // 0.005 / 0.02 = 0.25 of the coulomb level, never full coulomb.
-        CHECK(result.friction_torque < FrictionCompensator::coulomb_torque);
+        CHECK(result.friction_torque < coulomb_torque);
         CHECK(result.friction_torque > 0.0f);
     }
 
@@ -173,7 +175,7 @@ TEST_SUITE("friction_compensator") {
         }
         CHECK(result.state == FrictionCompensator::STATE_BREAKAWAY);
         CHECK(result.friction_torque == doctest::Approx(
-                FrictionCompensator::breakaway_torque).epsilon(0.02f));
+                breakaway_torque).epsilon(0.02f));
     }
 
     TEST_CASE("breakaway ramps instead of stepping") {
@@ -186,7 +188,7 @@ TEST_SUITE("friction_compensator") {
         // Just past the stall-confirm time: breakaway state, but the slew
         // limit means the torque has not yet reached the breakaway peak.
         CHECK(result.state == FrictionCompensator::STATE_BREAKAWAY);
-        CHECK(result.friction_torque < FrictionCompensator::breakaway_torque);
+        CHECK(result.friction_torque < breakaway_torque);
     }
 
     TEST_CASE("confirmed progress releases breakaway back to coulomb") {
@@ -203,7 +205,7 @@ TEST_SUITE("friction_compensator") {
         }
         CHECK(result.state == FrictionCompensator::STATE_RUNNING);
         CHECK(result.friction_torque <=
-                FrictionCompensator::coulomb_torque + 0.0001f);
+                coulomb_torque + 0.0001f);
     }
 
     TEST_CASE("direction reversal cannot reuse positive compensation") {
@@ -266,7 +268,7 @@ TEST_SUITE("friction_compensator") {
             compensator.update(true, 0.2f, 0.0f, 0.2f, 0, dt);
         const float before = compensator.friction_torque();
         CHECK(before == doctest::Approx(
-                FrictionCompensator::breakaway_torque).epsilon(0.02f));
+                breakaway_torque).epsilon(0.02f));
 
         // One disable cycle must not jump to zero.
         const float after_one = compensator.disable(dt);
@@ -278,6 +280,21 @@ TEST_SUITE("friction_compensator") {
         for (int i = 0; i < 4000; ++i)
             v = compensator.disable(dt);
         CHECK(std::abs(v) < 0.0002f);
+    }
+
+    TEST_CASE("configure clamps breakaway >= coulomb and rejects negatives") {
+        FrictionCompensator compensator;
+        compensator.configure(0.004f, 0.002f);  // breakaway < coulomb
+        CHECK(compensator.coulomb_torque() == doctest::Approx(0.004f));
+        CHECK(compensator.breakaway_torque() == doctest::Approx(0.004f));
+
+        compensator.configure(-1.0f, -2.0f);    // negatives -> 0
+        CHECK(compensator.coulomb_torque() == 0.0f);
+        CHECK(compensator.breakaway_torque() == 0.0f);
+
+        compensator.configure(0.0015f, 0.0055f); // normal
+        CHECK(compensator.coulomb_torque() == doctest::Approx(0.0015f));
+        CHECK(compensator.breakaway_torque() == doctest::Approx(0.0055f));
     }
 }
 

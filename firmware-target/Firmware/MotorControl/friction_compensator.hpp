@@ -31,10 +31,6 @@ public:
         STATE_RECOVERING,
     };
 
-    // Dynamic/Coulomb friction feed-forward amplitude [Nm].
-    static constexpr float coulomb_torque = 0.0040f;
-    // Static breakaway peak [Nm] (must be >= coulomb_torque).
-    static constexpr float breakaway_torque = 0.0080f;
     // Command magnitude below which the feed-forward fades to zero [turn/s].
     static constexpr float command_threshold = 0.02f;
     // Slew rates [Nm/s].  Slow rise avoids a torque step into the detent;
@@ -48,6 +44,19 @@ public:
     static constexpr int32_t recovery_progress_counts = 3;
     // Fraction of the commanded speed that counts as "confirmed moving".
     static constexpr float recovery_speed_ratio = 0.55f;
+
+    // Runtime torque amplitudes, set from the controller config each control
+    // cycle. breakaway >= coulomb is enforced here so illegal parameters
+    // degrade safely (never produce NaN or a negative feed-forward).
+    void configure(float coulomb_torque, float breakaway_torque) {
+        coulomb_torque_ = std::max(0.0f,
+                std::isfinite(coulomb_torque) ? coulomb_torque : 0.0f);
+        breakaway_torque_ = std::max(coulomb_torque_,
+                std::isfinite(breakaway_torque) ? breakaway_torque : coulomb_torque_);
+    }
+
+    float coulomb_torque() const { return coulomb_torque_; }
+    float breakaway_torque() const { return breakaway_torque_; }
 
     void clear() {
         state_ = STATE_IDLE;
@@ -135,7 +144,7 @@ public:
         const float command_mag = std::abs(command_velocity);
         const float coulomb_blend = std::clamp(
                 command_mag / command_threshold, 0.0f, 1.0f);
-        float target = direction * coulomb_torque * coulomb_blend;
+        float target = direction * coulomb_torque_ * coulomb_blend;
 
         if (state_ == STATE_IDLE)
             state_ = STATE_RUNNING;
@@ -173,13 +182,13 @@ public:
         }
 
         if (state_ == STATE_BREAKAWAY)
-            target = direction * breakaway_torque;
+            target = direction * breakaway_torque_;
 
         output_ = slew(output_, target, period);
 
         // Once the output has slewed back to the Coulomb level, go RUNNING.
         if (state_ == STATE_RECOVERING &&
-                std::abs(output_ - direction * coulomb_torque * coulomb_blend) <= 0.0001f) {
+                std::abs(output_ - direction * coulomb_torque_ * coulomb_blend) <= 0.0001f) {
             state_ = STATE_RUNNING;
         }
 
@@ -210,6 +219,8 @@ private:
     bool initialized_ = false;
     int32_t progress_count_ = 0;
     int32_t breakaway_start_count_ = 0;
+    float coulomb_torque_ = 0.0015f;
+    float breakaway_torque_ = 0.0055f;
 };
 
 #endif // __FRICTION_COMPENSATOR_HPP
