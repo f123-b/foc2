@@ -587,7 +587,8 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                 restore_foc_velocity_tuning(axis);
                 restore_foc_torque_safety(axis);
                 set_foc_control_mode(axis, Controller::CONTROL_MODE_VELOCITY_CONTROL);
-                apply_foc_position_limits(axis, 3.0f, 0.015f);
+                apply_foc_position_limits(axis, 3.0f,
+                        axis->controller_.config_.anticogging_calibration_torque_limit);
                 foc_position_limits[axis->axis_num_].cogging_calibration = true;
                 axis->controller_.start_anticogging_calibration(true);
                 axis->requested_state_ = Axis::AXIS_STATE_CLOSED_LOOP_CONTROL;

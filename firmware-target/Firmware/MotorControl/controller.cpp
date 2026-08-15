@@ -31,29 +31,27 @@ static constexpr uint32_t ANTICOGGING_POSITION_SCAN_POINTS =
 // safe fixed set (1/2/4/8).
 
 // Validate a finished cogging map from pre-computed statistics (O(1), no map
-// walk). A map that is under-covered, flat, saturated, spiky, or discontinuous
-// at the 0/360 wrap point must never be applied as a feed-forward.
+// walk). Thresholds are runtime-configurable.
 static bool anticogging_map_quality_ok(uint32_t valid_bins, uint32_t total_bins,
                                        float peak_to_peak, float max_abs,
-                                       float max_jump, float wrap_jump) {
+                                       float max_jump, float wrap_jump,
+                                       float min_coverage, float max_abs_limit,
+                                       float max_peak_to_peak,
+                                       float max_adjacent_jump,
+                                       float max_wrap_jump) {
     if (total_bins == 0)
         return false;
-    // Coverage: at least 80% of the bins must have a sample.
-    if (valid_bins * 5u < total_bins * 4u)
+    if (valid_bins < (uint32_t)((float)total_bins * std::clamp(min_coverage, 0.0f, 1.0f)))
         return false;
-    // Torque amplitude: a useful map has structure but stays well below the
-    // +/-0.012 Nm sample clamp (a saturated map means the scan torque ran away).
     if (peak_to_peak < 0.001f)
         return false;
-    if (max_abs > 0.012f)
+    if (max_abs > max_abs_limit)
         return false;
-    if (peak_to_peak > 0.020f)
+    if (peak_to_peak > max_peak_to_peak)
         return false;
-    // Sharp single-bin spikes and a 0/360 step are signs of a noisy or
-    // incomplete map rather than a smooth position-synchronous cogging curve.
-    if (max_jump > 0.003f)
+    if (max_jump > max_adjacent_jump)
         return false;
-    if (wrap_jump > 0.003f)
+    if (wrap_jump > max_wrap_jump)
         return false;
     return true;
 }
@@ -257,7 +255,7 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
             // is deliberate: the ABZ count feedback and the breakaway assist
             // need speed/current headroom during startup and reversal.
             config_.vel_limit = std::min(3.0f, config_.vel_limit);
-            config_.vel_ramp_rate = FOC_STUDIO_ABZ_SCAN_RAMP_RATE;
+            config_.vel_ramp_rate = config_.anticogging_calibration_accel;
             anticogging_scan_phase_ = ANTICOGGING_SCAN_RAMP_FORWARD;
             anticogging_scan_start_pos_ = anticogging_calibration_base_pos_;
             anticogging_reverse_start_pos_ = anticogging_calibration_base_pos_;
@@ -582,7 +580,12 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                 const bool quality_ok = anticogging_map_quality_ok(
                         anticogging_valid_bin_count_, 3600,
                         anticogging_map_peak_to_peak_, anticogging_map_max_abs_,
-                        anticogging_map_max_jump_, anticogging_map_wrap_jump_);
+                        anticogging_map_max_jump_, anticogging_map_wrap_jump_,
+                        config_.anticogging_quality_min_coverage,
+                        config_.anticogging_quality_max_abs,
+                        config_.anticogging_quality_max_peak_to_peak,
+                        config_.anticogging_quality_max_adjacent_jump,
+                        config_.anticogging_quality_max_wrap_jump);
                 if (quality_ok) {
                     anticogging_valid_ = true;
                     config_.anticogging.pre_calibrated = true;
@@ -723,7 +726,12 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
         anticogging_valid_ = anticogging_map_quality_ok(
                 anticogging_valid_bin_count_, ANTICOGGING_POSITION_SCAN_POINTS,
                 anticogging_map_peak_to_peak_, anticogging_map_max_abs_,
-                anticogging_map_max_jump_, anticogging_map_wrap_jump_);
+                anticogging_map_max_jump_, anticogging_map_wrap_jump_,
+                config_.anticogging_quality_min_coverage,
+                config_.anticogging_quality_max_abs,
+                config_.anticogging_quality_max_peak_to_peak,
+                config_.anticogging_quality_max_adjacent_jump,
+                config_.anticogging_quality_max_wrap_jump);
         config_.anticogging.pre_calibrated = anticogging_valid_;
         config_.anticogging.calib_anticogging = false;
         return true;
@@ -985,6 +993,7 @@ bool Controller::update(float* torque_setpoint_output) {
     // We get the current position and apply a current feed-forward
     // ensuring that we handle negative encoder positions properly (-1 == motor->encoder.encoder_cpr - 1)
     anticogging_torque_ = 0.0f;
+    anticogging_effective_scale_ = 0.0f;
     if (anticogging_valid_ && config_.anticogging.anticogging_enabled) {
         float anticogging_scale = 1.0f;
         const bool abz_velocity_mode =
@@ -1020,6 +1029,7 @@ bool Controller::update(float* torque_setpoint_output) {
                     ? config_.anticogging_torque_limit : 0.005f;
             anticogging_torque_ = anticogging_scale * config_.anticogging.cogging_ratio *
                     std::clamp(map_torque, -clamp_limit, clamp_limit);
+            anticogging_effective_scale_ = anticogging_scale * config_.anticogging.cogging_ratio;
             torque += anticogging_torque_;
         }
     }
@@ -1189,9 +1199,16 @@ bool Controller::update(float* torque_setpoint_output) {
                     v_err * current_meas_period;
         }
         // Bound the integrator to the tightest active limit so a saturated
-        // transient cannot store a large torque to release later.
+        // transient cannot store a large torque to release later. The ABZ
+        // integrator limit is itself bounded by the ABZ velocity torque limit.
+        float integrator_limit = effective_limit;
+        if (cascaded_abz_mode) {
+            const float il = config_.abz_velocity_integrator_limit;
+            if (std::isfinite(il) && il > 0.0f)
+                integrator_limit = std::min(il, effective_limit);
+        }
         vel_integrator_torque_ = std::clamp(
-                vel_integrator_torque_, -effective_limit, effective_limit);
+                vel_integrator_torque_, -integrator_limit, integrator_limit);
     }
 
     final_torque_ = torque;

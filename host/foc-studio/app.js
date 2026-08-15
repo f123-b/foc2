@@ -105,6 +105,7 @@ const dom = Object.fromEntries([
   'guideStartButton', 'coggingCalibrationButton', 'guideModeText',
   'stepSafety', 'stepMode', 'stepCalibration', 'stepSave', 'calibrationStatus',
   'calibrationOutput', 'readConfigButton', 'applyConfigButton', 'configSaveButton',
+  'tuningModeButton',
   'configStatus', 'faultTableBody', 'clearFaultHistoryButton', 'pageEyebrow', 'pageTitle',
   'mobileViewSelect', 'pwmStatus', 'watchdogStatus', 'currentStatus', 'controlReadyStatus',
   'currentModeBadge', 'safeProfileButton', 'scopeRunButton', 'scopeClearButton',
@@ -456,8 +457,16 @@ function ingestLine(line) {
   if (configReadQueue.length && !line.startsWith('ok ')) {
     const input = configReadQueue.shift();
     if (input) {
-      input.value = line;
-      input.dataset.deviceValue = line;
+      if (line.startsWith('invalid property') || line.startsWith('err ')) {
+        input.value = '读取失败';
+        input.dataset.readFailed = '1';
+        input.readOnly = true;
+        input.disabled = true;
+        input.title = '设备固件不支持此参数或协议版本不匹配';
+      } else {
+        input.value = line;
+        input.dataset.deviceValue = line;
+      }
     }
   }
 }
@@ -1414,7 +1423,17 @@ function bindActions() {
   dom.terminalInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') dom.terminalSendButton.click(); });
   dom.terminalClearButton.addEventListener('click', () => { dom.terminalLog.textContent = ''; });
   dom.readConfigButton.addEventListener('click', readConfig);
-  dom.applyConfigButton.addEventListener('click', applyConfig);
+  let tuningAdvancedMode = false;
+  const tuningAdvancedRows = [...document.querySelectorAll('[data-advanced="1"]')];
+  function applyTuningMode() {
+    tuningAdvancedRows.forEach((el) => { el.hidden = !tuningAdvancedMode; });
+    dom.tuningModeButton.textContent = tuningAdvancedMode ? '高级参数' : '基础参数';
+  }
+  dom.tuningModeButton.addEventListener('click', () => {
+    tuningAdvancedMode = !tuningAdvancedMode;
+    applyTuningMode();
+  });
+  applyTuningMode();  dom.applyConfigButton.addEventListener('click', applyConfig);
   dom.safeProfileButton.addEventListener('click', loadSafeProfile);
   dom.brakeOffPresetButton.addEventListener('click', () => loadBrakePreset(0));
   dom.brake5PresetButton.addEventListener('click', () => loadBrakePreset(5));

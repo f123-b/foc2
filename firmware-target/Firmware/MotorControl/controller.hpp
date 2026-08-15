@@ -56,6 +56,8 @@ public:
         // ABZ velocity-loop torque limit [Nm], applied to P+I+FF before the
         // motor global torque limit. <= 0 or non-finite disables it.
         float abz_velocity_torque_limit = 0.015f;
+        // Bound on the velocity integrator torque [Nm] (<= torque limit).
+        float abz_velocity_integrator_limit = 0.015f;
         // Coulomb/dynamic friction feed-forward and static breakaway torque
         // [Nm] for the ABZ velocity loop. breakaway >= coulomb is enforced.
         float abz_coulomb_friction_torque = 0.0015f;
@@ -80,6 +82,14 @@ public:
         float anticogging_scan_dwell_time = 0.15f;        // [s]
         float anticogging_scan_turns = 6.0f;              // turns/direction
         uint16_t anticogging_postprocess_bins_per_cycle = 4;
+        float anticogging_calibration_accel = 2.0f;       // [turn/s^2]
+        float anticogging_calibration_torque_limit = 0.015f; // [Nm]
+        // Map quality gate thresholds.
+        float anticogging_quality_min_coverage = 0.8f;
+        float anticogging_quality_max_abs = 0.012f;
+        float anticogging_quality_max_peak_to_peak = 0.020f;
+        float anticogging_quality_max_adjacent_jump = 0.003f;
+        float anticogging_quality_max_wrap_jump = 0.003f;
         uint8_t axis_to_mirror = -1;
         float mirror_ratio = 1.0f;
         uint8_t load_encoder_axis = -1;  // default depends on Axis number and is set in load_configuration()
@@ -170,6 +180,7 @@ public:
     float velocity_loop_torque_ = 0.0f;
     float velocity_proportional_torque_ = 0.0f;
     float anticogging_torque_ = 0.0f;
+    float anticogging_effective_scale_ = 0.0f;
     float final_torque_ = 0.0f;
     // PI telemetry: velocity error, unsaturated torque and saturation flag.
     float velocity_error_ = 0.0f;

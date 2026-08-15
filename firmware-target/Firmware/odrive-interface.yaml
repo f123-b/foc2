@@ -650,6 +650,7 @@ interfaces:
       trajectory_done: readonly bool
       vel_integrator_torque: float32
       anticogging_valid: bool
+      anticogging_effective_scale: readonly float32
       config:
         c_is_class: False
         attributes:
@@ -703,6 +704,66 @@ interfaces:
             type: float32
             unit: 1/s
             c_setter: set_input_filter_bandwidth
+          abz_vel_gain:
+            type: float32
+            unit: Nm/(turn/s)
+          abz_vel_integrator_gain:
+            type: float32
+            unit: Nm/(turn/s * s)
+          control_velocity_observer_bandwidth:
+            type: float32
+            unit: Hz
+          abz_velocity_torque_limit:
+            type: float32
+            unit: Nm
+          abz_velocity_integrator_limit:
+            type: float32
+            unit: Nm
+          abz_coulomb_friction_torque:
+            type: float32
+            unit: Nm
+          abz_breakaway_torque:
+            type: float32
+            unit: Nm
+          enable_low_speed_compensation: bool
+          friction_command_threshold: float32
+          friction_stall_confirm_time: float32
+          friction_recovery_speed_ratio: float32
+          friction_recovery_confirm_time: float32
+          friction_stall_velocity_threshold: float32
+          friction_reverse_velocity_threshold: float32
+          friction_breakaway_rise_rate: float32
+          friction_assist_reengage_rate: float32
+          friction_recovery_release_rate: float32
+          friction_disable_fall_rate: float32
+          anticogging_phase_offset_bins: float32
+          anticogging_torque_limit:
+            type: float32
+            unit: Nm
+          anticogging_scan_speed:
+            type: float32
+            unit: turn/s
+          anticogging_scan_velocity_tolerance:
+            type: float32
+            unit: turn/s
+          anticogging_scan_dwell_time:
+            type: float32
+            unit: s
+          anticogging_scan_turns:
+            type: float32
+            unit: turn
+          anticogging_postprocess_bins_per_cycle: uint16
+          anticogging_calibration_accel:
+            type: float32
+            unit: turn/s^2
+          anticogging_calibration_torque_limit:
+            type: float32
+            unit: Nm
+          anticogging_quality_min_coverage: float32
+          anticogging_quality_max_abs: float32
+          anticogging_quality_max_peak_to_peak: float32
+          anticogging_quality_max_adjacent_jump: float32
+          anticogging_quality_max_wrap_jump: float32
           anticogging:
             c_is_class: False
             attributes:
@@ -711,7 +772,7 @@ interfaces:
               calib_anticogging: readonly bool
               calib_pos_threshold: float32
               calib_vel_threshold: float32
-              cogging_ratio: readonly float32
+              cogging_ratio: float32
               anticogging_enabled: bool
     functions:
       move_incremental:
