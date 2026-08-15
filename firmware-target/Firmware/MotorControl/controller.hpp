@@ -166,6 +166,8 @@ public:
     float friction_assist_blend_ = 0.0f;
     float friction_no_progress_time_ = 0.0f;
     float friction_recovery_timer_ = 0.0f;
+    float friction_forward_velocity_ = 0.0f;
+    bool friction_reverse_detected_ = false;
     ControlVelocityObserver control_velocity_observer_;
     float control_observer_velocity_ = 0.0f;   // [turn/s]
     bool control_observer_valid_ = false;

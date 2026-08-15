@@ -119,6 +119,8 @@ void Controller::reset(bool abort_anticogging) {
     friction_assist_blend_ = 0.0f;
     friction_no_progress_time_ = 0.0f;
     friction_recovery_timer_ = 0.0f;
+    friction_forward_velocity_ = 0.0f;
+    friction_reverse_detected_ = false;
     control_observer_velocity_ = 0.0f;
     control_observer_valid_ = false;
     position_error_ = 0.0f;
@@ -858,6 +860,8 @@ bool Controller::update(float* torque_setpoint_output) {
         friction_assist_blend_ = 0.0f;
         friction_no_progress_time_ = 0.0f;
         friction_recovery_timer_ = 0.0f;
+        friction_forward_velocity_ = 0.0f;
+        friction_reverse_detected_ = false;
         const bool abz_velocity_mode = cascaded_abz_mode &&
                 config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL;
         const bool friction_enabled =
@@ -880,6 +884,8 @@ bool Controller::update(float* torque_setpoint_output) {
             friction_assist_blend_ = compensation.assist_blend;
             friction_no_progress_time_ = compensation.no_progress_time;
             friction_recovery_timer_ = compensation.recovery_timer;
+            friction_forward_velocity_ = compensation.forward_velocity;
+            friction_reverse_detected_ = compensation.reverse_detected;
         } else {
             // Graceful ramp-to-zero instead of a one-cycle torque step.
             low_speed_friction_torque_ =

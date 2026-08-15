@@ -379,7 +379,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float v_beta = power_stage_active ? current_control.final_v_beta : 0.0f;
             axis->watchdog_feed();
             respond(response_channel, use_checksum,
-                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g",
+                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u",
                     (unsigned)axis->current_state_, (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
                     (double)v_alpha,
@@ -421,7 +421,9 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (double)axis->controller_.friction_speed_ratio_,
                     (double)axis->controller_.friction_assist_blend_,
                     (double)axis->controller_.friction_no_progress_time_,
-                    (double)axis->controller_.friction_recovery_timer_);
+                    (double)axis->controller_.friction_recovery_timer_,
+                    (double)axis->controller_.friction_forward_velocity_,
+                    (unsigned)axis->controller_.friction_reverse_detected_);
         }
 
     } else if (cmd[0] == 'j') { // FOC Studio aggregate telemetry

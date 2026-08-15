@@ -60,6 +60,7 @@ assert.deepEqual(parseFastTelemetry('! 8 1.25 -0.3 2.5 12.2 1 -0.2 -0.8 0.01 -0.
   abzCoulombFrictionTorque: 0, abzBreakawayTorque: 0, enableLowSpeedCompensation: 0,
   frictionTargetTorque: 0, frictionSpeedRatio: 0, frictionAssistBlend: 0,
   frictionNoProgressTime: 0, frictionRecoveryTimer: 0,
+  frictionForwardVelocity: 0, frictionReverseDetected: 0,
 });
 const controlTelemetry = parseFastTelemetry('! 8 0.2 0.3 2.5 12.2 1 -0.2 -0.8 0.01 0.25 0 0.2 0.35 0.175 0.0015 0.003 2.55 0.05 2 0.0004 -0.0008 0.0041 0.0254');
 assert.equal(controlTelemetry.velocitySetpoint, 0.2);

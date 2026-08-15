@@ -296,6 +296,32 @@ TEST_SUITE("friction_compensator") {
         CHECK(compensator.coulomb_torque() == doctest::Approx(0.0015f));
         CHECK(compensator.breakaway_torque() == doctest::Approx(0.0055f));
     }
+
+    TEST_CASE("directional speed ratio rejects reverse motion and is symmetric") {
+        // speed_ratio must be the velocity PROJECTED onto the command
+        // direction, never abs(measured). Reverse motion -> 0.
+        auto ratio = [](float command, float measured) {
+            FrictionCompensator c;
+            const auto r = c.update(true, command, measured,
+                    command - measured, 0, dt);
+            return r.speed_ratio;
+        };
+        CHECK(ratio(0.2f, 0.2f) == doctest::Approx(1.0f).epsilon(0.01f));
+        CHECK(ratio(0.2f, 0.1f) == doctest::Approx(0.5f).epsilon(0.01f));
+        CHECK(ratio(0.2f, 0.0f) == 0.0f);
+        CHECK(ratio(0.2f, -0.2f) == 0.0f);
+        CHECK(ratio(-0.2f, -0.2f) == doctest::Approx(1.0f).epsilon(0.01f));
+        CHECK(ratio(-0.2f, 0.2f) == 0.0f);
+    }
+
+    TEST_CASE("reverse motion is detected and keeps assist at breakaway") {
+        FrictionCompensator compensator;
+        const auto r = compensator.update(
+                true, 0.2f, -0.2f, 0.4f, 0, dt);
+        CHECK(r.reverse_detected == true);
+        CHECK(r.speed_ratio == 0.0f);
+        CHECK(r.assist_blend == doctest::Approx(1.0f));
+    }
 }
 
 TEST_SUITE("control_velocity_observer") {
