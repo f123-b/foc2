@@ -17,6 +17,8 @@ void SensorlessEstimator::reset() {
     V_alpha_beta_memory_[0] = 0.0f;
     V_alpha_beta_memory_[1] = 0.0f;
     estimator_good_ = false;
+    hfi_phase_error_ = 0.0f;
+    hfi_demod_ = 0.0f;
 }
 
 bool SensorlessEstimator::update() {
@@ -35,6 +37,30 @@ bool SensorlessEstimator::update() {
 
     // Swap sign of I_beta if motor is reversed
     I_alpha_beta[1] *= axis_->motor_.config_.direction;
+
+    // Demodulate the quadrature response to the d-axis carrier generated in
+    // Motor::FOC_current. This gives the observer a low-speed phase hint;
+    // the deliberately slow correction prevents the carrier from entering
+    // the mechanical PLL velocity estimate.
+    const auto& mc = axis_->motor_.config_;
+    if (mc.sensorless_hfi_enable &&
+            std::abs(vel_estimate_) < mc.sensorless_hfi_stop_speed &&
+            mc.sensorless_hfi_frequency > 0.0f) {
+        const float c = our_arm_cos_f32(pll_pos_);
+        const float s = our_arm_sin_f32(pll_pos_);
+        const float iq_hfi = c * I_alpha_beta[1] - s * I_alpha_beta[0];
+        const float demod = iq_hfi * our_arm_sin_f32(
+                axis_->motor_.current_control_.hfi_phase);
+        const float alpha = std::clamp(
+                2.0f * current_meas_period * mc.sensorless_hfi_frequency,
+                0.0f, 1.0f);
+        hfi_demod_ += alpha * (demod - hfi_demod_);
+        hfi_phase_error_ = std::clamp(0.08f * hfi_demod_, -0.05f, 0.05f);
+        pll_pos_ = wrap_pm_pi(pll_pos_ + hfi_phase_error_ * current_meas_period);
+    } else {
+        hfi_demod_ *= 0.98f;
+        hfi_phase_error_ *= 0.98f;
+    }
 
     // alpha-beta vector operations
     float eta[2];
@@ -96,8 +122,11 @@ bool SensorlessEstimator::update() {
 
     vel_estimate_valid_ = true;
     // This back-EMF observer cannot provide a trustworthy standstill angle.
+    const bool hfi_low_speed_ready = axis_->motor_.config_.sensorless_hfi_enable &&
+            std::abs(vel_estimate_) >= 0.05f &&
+            std::abs(vel_estimate_) < axis_->motor_.config_.sensorless_hfi_stop_speed;
     estimator_good_ = axis_->current_state_ == Axis::AXIS_STATE_SENSORLESS_CONTROL &&
             axis_->lockin_state_ == Axis::LOCKIN_STATE_INACTIVE &&
-            std::abs(vel_estimate_) >= 3.0f;
+            (std::abs(vel_estimate_) >= 3.0f || hfi_low_speed_ready);
     return true;
 };

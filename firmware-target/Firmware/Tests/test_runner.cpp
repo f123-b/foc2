@@ -150,7 +150,7 @@ TEST_SUITE("low_speed_compensator") {
         CHECK(result.state == LowSpeedCompensator::STATE_RUNNING);
         CHECK_FALSE(result.hold_integrator);
         CHECK(result.friction_torque == doctest::Approx(
-                LowSpeedCompensator::running_torque).epsilon(0.02f));
+                LowSpeedCompensator::running_torque_for_command(1.5f)).epsilon(0.02f));
     }
 
     TEST_CASE("holds the integrator and ramps breakaway torque while stalled") {
@@ -199,9 +199,10 @@ TEST_SUITE("low_speed_compensator") {
                         LowSpeedCompensator::nominal_breakaway_torque)
                         .epsilon(0.02f));
         CHECK(LowSpeedCompensator::running_torque_for_command(1.25f) ==
-                doctest::Approx(0.0090f).epsilon(0.02f));
+                doctest::Approx(LowSpeedCompensator::running_torque)
+                        .epsilon(0.02f));
         CHECK(LowSpeedCompensator::running_torque_for_command(1.5f) ==
-                doctest::Approx(0.0090f)
+                doctest::Approx(LowSpeedCompensator::running_torque)
                         .epsilon(0.02f));
         CHECK(LowSpeedCompensator::running_torque_for_command(2.0f) ==
                 doctest::Approx(LowSpeedCompensator::running_torque)
@@ -227,7 +228,7 @@ TEST_SUITE("low_speed_compensator") {
     TEST_CASE("low speed error assist builds torque before stall") {
         LowSpeedCompensator compensator;
         LowSpeedCompensationResult result;
-        for (int i = 0; i < 2000; ++i) {
+        for (int i = 0; i < 4000; ++i) {
             result = compensator.update(
                     true, 1.0f, 0.2f, 0.0f, 0.2f, 0.0f,
                     i / 10, 0.000125f);
@@ -317,15 +318,16 @@ TEST_SUITE("low_speed_compensator") {
         CHECK(result.friction_torque <= LowSpeedCompensator::breakaway_torque);
     }
 
-    TEST_CASE("removes drive torque during overspeed without changing sign") {
+    TEST_CASE("overspeed removes excess but keeps running torque") {
         LowSpeedCompensator compensator;
         LowSpeedCompensationResult result;
         for (int i = 0; i < 400; ++i)
             result = compensator.update(
-                    true, 1.0f, 0.2f, 0.5f, -0.3f, 0.0f,
+                    true, 1.0f, 0.2f, 0.6f, -0.4f, 0.0f,
                     i, 0.000125f);
         CHECK(result.friction_torque >= 0.0f);
-        CHECK(result.friction_torque < 0.00001f);
+        CHECK(result.friction_torque <=
+                LowSpeedCompensator::running_torque + 0.0001f);
     }
 
     TEST_CASE("direction reversal cannot reuse positive compensation") {

@@ -1,7 +1,7 @@
 import {
   AXIS_STATE, CONTROL_MODE, LineParser, MODE, command, decodeFaults, encodeCommand,
   faultSummary, parseFastTelemetry, parseTelemetry,
-} from './protocol.js?v=abz-low-speed-v2';
+} from './protocol.js?v=abz-low-speed-v3';
 
 const state = {
   transport: 'disconnected',
@@ -31,6 +31,10 @@ const state = {
   velocityIntegratorTorque: 0,
   lowSpeedTorque: 0,
   lowSpeedState: 0,
+  velocityProportionalTorque: 0,
+  anticoggingTorque: 0,
+  finalTorque: 0,
+  maxAvailableTorque: 0,
   observerLocked: false,
   angleError: 0,
   motorError: 0,
@@ -343,7 +347,13 @@ function renderStatus() {
   dom.pwmStatus.textContent = state.pwmArmed ? '已使能' : '已关闭';
   dom.pwmStatus.style.color = state.pwmArmed ? 'var(--red)' : 'var(--green)';
   dom.watchdogStatus.textContent = state.stateCode === 1 ? 'Idle 不计时' : '1.0 s 运行保护';
-  dom.currentStatus.textContent = state.stateCode === 1 || !state.pwmArmed ? '功率级关闭，显示 0 A' : '实时 q 轴电流';
+  if (state.stateCode === 1 || !state.pwmArmed) {
+    dom.currentStatus.textContent = '功率级关闭，显示 0 A';
+  } else if (Number(state.maxAvailableTorque) > 0) {
+    dom.currentStatus.textContent = `实时 q 轴电流 · 可用转矩 ${Number(state.maxAvailableTorque).toFixed(3)}`;
+  } else {
+    dom.currentStatus.textContent = '实时 q 轴电流 · 可用转矩为 0/未匹配固件';
+  }
   const ready = state.motorCalibrated && state.direction !== 0 && (isSensorless() || state.encoderReady);
   dom.controlReadyStatus.textContent = ready ? '允许进入控制' : '需要校准/方向确认';
   dom.controlReadyStatus.style.color = ready ? 'var(--green)' : 'var(--orange)';
@@ -832,6 +842,9 @@ const chartSeries = Object.freeze({
   positionError: { label: '位置误差', color: '#c2418c', floor: 0.001, unit: 'turn' },
   velocityIntegratorTorque: { label: '速度积分转矩', color: '#7a5af8', floor: 0.001, unit: 'Nm' },
   lowSpeedTorque: { label: '低速补偿转矩', color: '#b45309', floor: 0.001, unit: 'Nm' },
+  velocityProportionalTorque: { label: '速度 P 转矩', color: '#9354c7', floor: 0.001, unit: 'Nm' },
+  anticoggingTorque: { label: '齿槽补偿转矩', color: '#0f9f6e', floor: 0.001, unit: 'Nm' },
+  finalTorque: { label: '最终转矩', color: '#444ce7', floor: 0.001, unit: 'Nm' },
   current: { label: 'Iq 测量', color: '#d07a00', floor: 0.1, unit: 'A' },
   iqSetpoint: { label: 'Iq 给定', color: '#efb118', floor: 0.1, unit: 'A' },
   idMeasured: { label: 'Id 测量', color: '#06a67a', floor: 0.05, unit: 'A' },
@@ -857,6 +870,9 @@ function captureTelemetrySample() {
     positionTarget: state.positionTarget,
     velocityIntegratorTorque: state.velocityIntegratorTorque,
     lowSpeedTorque: state.lowSpeedTorque,
+    velocityProportionalTorque: state.velocityProportionalTorque,
+    anticoggingTorque: state.anticoggingTorque,
+    finalTorque: state.finalTorque,
     current: state.current,
     iqSetpoint: state.iqSetpoint,
     idMeasured: state.idMeasured,

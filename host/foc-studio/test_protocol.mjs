@@ -50,8 +50,10 @@ assert.deepEqual(parseFastTelemetry('! 8 1.25 -0.3 2.5 12.2 1 -0.2 -0.8 0.01 -0.
   velocitySetpoint: 0, rawVelocity: 1.25, windowVelocity: 1.25,
   velocityIntegratorTorque: 0, lowSpeedTorque: 0,
   positionSetpoint: 2.5, positionError: 0, lowSpeedState: 0,
+  velocityProportionalTorque: 0, anticoggingTorque: 0, finalTorque: 0,
+  maxAvailableTorque: 0,
 });
-const controlTelemetry = parseFastTelemetry('! 8 0.2 0.3 2.5 12.2 1 -0.2 -0.8 0.01 0.25 0 0.2 0.35 0.175 0.0015 0.003 2.55 0.05 2');
+const controlTelemetry = parseFastTelemetry('! 8 0.2 0.3 2.5 12.2 1 -0.2 -0.8 0.01 0.25 0 0.2 0.35 0.175 0.0015 0.003 2.55 0.05 2 0.0004 -0.0008 0.0041 0.0254');
 assert.equal(controlTelemetry.velocitySetpoint, 0.2);
 assert.equal(controlTelemetry.rawVelocity, 0.35);
 assert.equal(controlTelemetry.windowVelocity, 0.175);
@@ -60,6 +62,10 @@ assert.equal(controlTelemetry.lowSpeedTorque, 0.003);
 assert.equal(controlTelemetry.positionSetpoint, 2.55);
 assert.equal(controlTelemetry.positionError, 0.05);
 assert.equal(controlTelemetry.lowSpeedState, 2);
+assert.equal(controlTelemetry.velocityProportionalTorque, 0.0004);
+assert.equal(controlTelemetry.anticoggingTorque, -0.0008);
+assert.equal(controlTelemetry.finalTorque, 0.0041);
+assert.equal(controlTelemetry.maxAvailableTorque, 0.0254);
 assert.equal(parseFastTelemetry('@ 8 0 1 2 3 4 5 6 7 8 9'), null);
 assert.ok(decodeFaults(detailed).some(({ title }) => title.includes('DRV8301')));
 assert.ok(faultSummary(detailed).includes('编码器'));

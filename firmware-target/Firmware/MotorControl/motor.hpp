@@ -33,6 +33,7 @@ public:
         float acim_rotor_flux; // [A]
         float async_phase_vel; // [rad/s electrical]
         float async_phase_offset; // [rad electrical]
+        float hfi_phase; // [rad]
     };
 
     // NOTE: for gimbal motors, all units of Nm are instead V.
@@ -64,6 +65,11 @@ public:
         bool acim_autoflux_enable = false;
         float acim_autoflux_attack_gain = 10.0f;
         float acim_autoflux_decay_gain = 1.0f;
+        bool sensorless_hfi_enable = true;
+        float sensorless_hfi_frequency = 500.0f; // [Hz]
+        float sensorless_hfi_voltage = 0.35f; // [V peak]
+        float sensorless_hfi_start_speed = 3.0f; // [turn/s]
+        float sensorless_hfi_stop_speed = 4.0f; // [turn/s]
 
         // custom property setters
         Motor* parent = nullptr;
@@ -156,6 +162,7 @@ public:
         .acim_rotor_flux = 0.0f,
         .async_phase_vel = 0.0f,
         .async_phase_offset = 0.0f,
+        .hfi_phase = 0.0f,
     };
     struct : GateDriverIntf {
         DrvFault drv_fault = DRV_FAULT_NO_FAULT;

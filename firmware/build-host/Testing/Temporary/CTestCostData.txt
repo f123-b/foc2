@@ -1,2 +1,2 @@
-foc2_core_tests 15 0.0058465
+foc2_core_tests 18 0.000722072
 ---

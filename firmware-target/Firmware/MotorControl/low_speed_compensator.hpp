@@ -44,28 +44,34 @@ public:
     // Keep enough torque after breakaway to stay above static friction at
     // 0.2--1.0 turn/s; otherwise the rotor stops again as soon as the ramp
     // enters recovery.
-    static constexpr float running_torque = 0.0040f;
-    static constexpr float soft_breakaway_torque = 0.0085f;
+    static constexpr float running_torque = 0.0060f;
+    static constexpr float soft_breakaway_torque = 0.0090f;
     // The nominal ceiling is retained at and above 1 turn/s.  Below that
     // point static friction dominates, so allow a little more bounded torque
     // to cross a tooth without raising the current limit for the whole speed
     // range.  The controller multiplies this by its low-speed fade below 2
     // turn/s, so the additional torque is confined to the actual breakaway
     // region.
-    static constexpr float breakaway_torque = 0.0180f;
-    static constexpr float nominal_breakaway_torque = 0.0140f;
+    static constexpr float breakaway_torque = 0.0120f;
+    static constexpr float nominal_breakaway_torque = 0.0060f;
     // Once the rotor has crossed a tooth, do not immediately fall back to
-    // the 4 mNm running value.  That value is adequate above the sparse-count
-    // region, but it lets this motor stop again at 0.2--1.0 turn/s.  Keep the
-    // nominal hold torque through 1 turn/s and taper it out by 1.5 turn/s;
+    // the running value. That value is adequate above the sparse-count
+    // region, but it lets this motor stop again at 0.2--1.0 turn/s. Keep the
+    // nominal hold torque through 1 turn/s and taper it out by 2 turn/s;
     // the controller's separate low-speed fade keeps the added torque out of
-    // the normal 1.5--2 turn/s operating band.
+    // the normal 2--2.5 turn/s operating band.
     static constexpr float low_speed_hold_end = 1.0f;
-    static constexpr float low_speed_hold_fade_end = 1.5f;
+    static constexpr float low_speed_hold_fade_end = 2.0f;
     static constexpr float torque_rise_rate = 0.0180f;
     static constexpr float torque_fall_rate = 0.60f;
-    static constexpr float overspeed_fade_band = 0.12f;
-    static constexpr float error_assist_gain = 0.020f;
+    // The ABZ velocity feedback carries a position-synchronous ripple of a few
+    // tenths of a turn/s at low speed. A band too close to that ripple makes
+    // the hold torque drop out on every ripple peak, so the rotor repeatedly
+    // loses and rebuilds torque and the speed cannot hold; a band too wide lets
+    // the rotor overshoot before the hold is removed. Keep it between the two,
+    // and rely on the independent overspeed fault for real runaway.
+    static constexpr float overspeed_fade_band = 0.20f;
+    static constexpr float error_assist_gain = 0.006f;
     // A single filtered ABZ edge can look like an overspeed sample for a few
     // milliseconds.  Do not unload the hold torque until the excess speed is
     // persistent; the independent controller overspeed fault remains armed.
@@ -73,9 +79,12 @@ public:
     // A bounded low-speed hold term replaces the normal velocity integrator,
     // which is intentionally clamped in the sparse-count region.  It builds
     // slowly from persistent positive error and releases quickly on overspeed.
-    static constexpr float speed_hold_gain = 0.12f;
+    // A gain that is too large turns this slow integral into a second limit
+    // cycle: it pushes the rotor past the command, then the overspeed fade
+    // pulls it back. Keep it modest so it damps rather than oscillates.
+    static constexpr float speed_hold_gain = 0.04f;
     static constexpr float speed_hold_decay = 0.60f;
-    static constexpr float speed_hold_limit = 0.0090f;
+    static constexpr float speed_hold_limit = 0.0060f;
 
     static float running_torque_for_command(float command_velocity) {
         const float command_speed = std::abs(command_velocity);
@@ -231,7 +240,13 @@ public:
                 (breakaway_torque - nominal_breakaway_torque);
         target_magnitude = std::min(target_magnitude, low_speed_ceiling);
 
-        // Remove feed-forward continuously once the rotor passes the command.
+        // Remove the EXCESS feed-forward once the rotor passes the command,
+        // but always keep the dynamic-friction running torque (running_torque,
+        // NOT the speed-dependent base_running_torque, which at low speed is
+        // the higher hold torque). Dropping to zero lets the rotor coast into
+        // static friction and stop; keeping the hold torque keeps pushing the
+        // rotor past the command (runaway). Keeping running_torque lets the
+        // rotor decelerate to the dynamic-friction level and stay turning.
         const float overspeed = std::max(
                 0.0f, forward_velocity - direction_command);
         if (overspeed > overspeed_fade_band) {
@@ -246,7 +261,10 @@ public:
                 confirmed_overspeed / overspeed_fade_band, 0.0f, 1.0f);
         const float smooth_ratio = overspeed_ratio * overspeed_ratio *
                 (3.0f - 2.0f * overspeed_ratio);
-        target_magnitude *= 1.0f - smooth_ratio;
+        const float excess_torque = std::max(
+                0.0f, target_magnitude - running_torque);
+        target_magnitude = running_torque +
+                excess_torque * (1.0f - smooth_ratio);
 
         compensation_magnitude_ = slew(
                 compensation_magnitude_, target_magnitude,

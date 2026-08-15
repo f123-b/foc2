@@ -63,6 +63,7 @@ void Motor::reset_current_control() {
     current_control_.Ibus = 0.0f;
     current_control_.Id_setpoint = 0.0f;
     current_control_.Iq_setpoint = 0.0f;
+    current_control_.hfi_phase = 0.0f;
     current_control_.Id_measured = 0.0f;
     current_control_.Iq_measured = 0.0f;
 }
@@ -383,6 +384,25 @@ bool Motor::FOC_current(float Id_des, float Iq_des, float I_phase, float pwm_pha
     // Apply PI control
     float Vd = ictrl.v_current_control_integral_d + Ierr_d * ictrl.p_gain;
     float Vq = ictrl.v_current_control_integral_q + Ierr_q * ictrl.p_gain;
+
+    if (axis_->current_state_ == Axis::AXIS_STATE_SENSORLESS_CONTROL &&
+            config_.sensorless_hfi_enable &&
+            std::abs(axis_->sensorless_estimator_.vel_estimate_) <
+                    config_.sensorless_hfi_stop_speed &&
+            config_.sensorless_hfi_frequency > 0.0f &&
+            config_.sensorless_hfi_voltage > 0.0f) {
+        constexpr float two_pi = 6.28318530717958647692f;
+        ictrl.hfi_phase = wrap_pm_pi(ictrl.hfi_phase +
+                two_pi * config_.sensorless_hfi_frequency * current_meas_period);
+        const float hfi_blend = std::clamp(
+                (config_.sensorless_hfi_stop_speed -
+                 std::abs(axis_->sensorless_estimator_.vel_estimate_)) /
+                std::max(0.01f, config_.sensorless_hfi_stop_speed -
+                                config_.sensorless_hfi_start_speed),
+                0.0f, 1.0f);
+        Vd += hfi_blend * config_.sensorless_hfi_voltage *
+                our_arm_sin_f32(ictrl.hfi_phase);
+    }
 
     float mod_to_V = (2.0f / 3.0f) * vbus_voltage;
     float V_to_mod = 1.0f / mod_to_V;

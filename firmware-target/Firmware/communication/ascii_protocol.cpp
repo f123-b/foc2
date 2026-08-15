@@ -166,6 +166,14 @@ static void restore_foc_torque_safety(Axis* axis) {
     safety.active = false;
 }
 
+// A sustained torque command on an unloaded rotor has no software speed
+// boundary of its own and would otherwise accelerate until the overspeed
+// fault trips. Cap the software velocity boundary at the proven low-speed
+// operating point; the configured limit remains the tighter bound when it is
+// already lower. The independent overspeed fault, motor current limit and
+// thermal protection remain enabled as a second line of defence.
+static constexpr float FOC_TORQUE_MODE_VEL_LIMIT = 2.0f;
+
 static void apply_foc_torque_safety(Axis* axis) {
     FocTorqueSafetyState& safety = foc_torque_safety[axis->axis_num_];
     if (!safety.active) {
@@ -176,10 +184,10 @@ static void apply_foc_torque_safety(Axis* axis) {
         safety.enable_overspeed_error = axis->controller_.config_.enable_overspeed_error;
         safety.active = true;
     }
-    // Torque mode must preserve the requested torque instead of silently
-    // clamping it against a software velocity target. The independent
-    // overspeed fault, motor current limit and thermal protection remain on.
-    axis->controller_.config_.enable_current_mode_vel_limit = false;
+    axis->controller_.config_.vel_limit = std::min(
+            std::abs(axis->controller_.config_.vel_limit),
+            FOC_TORQUE_MODE_VEL_LIMIT);
+    axis->controller_.config_.enable_current_mode_vel_limit = true;
     axis->controller_.config_.enable_overspeed_error = true;
 }
 
@@ -386,7 +394,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float v_beta = power_stage_active ? current_control.final_v_beta : 0.0f;
             axis->watchdog_feed();
             respond(response_channel, use_checksum,
-                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u",
+                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g",
                     (unsigned)axis->current_state_, (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
                     (double)v_alpha,
@@ -401,7 +409,11 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (double)axis->controller_.low_speed_friction_torque_,
                     (double)axis->controller_.pos_setpoint_,
                     (double)axis->controller_.position_error_,
-                    (unsigned)axis->controller_.low_speed_compensator_state_);
+                    (unsigned)axis->controller_.low_speed_compensator_state_,
+                    (double)axis->controller_.velocity_proportional_torque_,
+                    (double)axis->controller_.anticogging_torque_,
+                    (double)axis->controller_.final_torque_,
+                    (double)axis->motor_.max_available_torque());
         }
 
     } else if (cmd[0] == 'j') { // FOC Studio aggregate telemetry
@@ -527,7 +539,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                 restore_foc_velocity_tuning(axis);
                 restore_foc_torque_safety(axis);
                 set_foc_control_mode(axis, Controller::CONTROL_MODE_VELOCITY_CONTROL);
-                apply_foc_position_limits(axis, 2.2f, 0.015f);
+                apply_foc_position_limits(axis, 3.0f, 0.015f);
                 foc_position_limits[axis->axis_num_].cogging_calibration = true;
                 axis->controller_.start_anticogging_calibration(true);
                 axis->requested_state_ = Axis::AXIS_STATE_CLOSED_LOOP_CONTROL;

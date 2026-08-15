@@ -1,9 +1,4 @@
 # ninja log v7
-24	145	8083315126961568	CMakeFiles/foc2_core.dir/src/safety_state.cpp.obj	f1e7f231c303c3eb
-17	258	8083315126891573	CMakeFiles/foc2_core.dir/src/feedback_mode.cpp.obj	c049cca3a0b58466
-30	275	8083315127021572	CMakeFiles/foc2_core_tests.dir/tests/test_core.cpp.obj	5f94a27e932fd601
-260	449	8083315129325818	libfoc2_core.a	2227ff2bdcd48ca6
-450	686	8083315131215911	foc2_core_tests.exe	e60325ad1299c76c
 22	1382	8084003410090597	CMakeFiles/foc2_core.dir/src/safety_state.cpp.obj	f1e7f231c303c3eb
 15	1648	8084003410016345	CMakeFiles/foc2_core.dir/src/feedback_mode.cpp.obj	c049cca3a0b58466
 27	1691	8084003410142562	CMakeFiles/foc2_core_tests.dir/tests/test_core.cpp.obj	5f94a27e932fd601

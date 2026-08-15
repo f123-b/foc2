@@ -29,6 +29,8 @@ public:
     float flux_state_[2] = {0.0f, 0.0f};        // [Vs]
     float V_alpha_beta_memory_[2] = {0.0f, 0.0f}; // [V]
     bool estimator_good_ = false;
+    float hfi_phase_error_ = 0.0f;
+    float hfi_demod_ = 0.0f;
 };
 
 #endif /* __SENSORLESS_ESTIMATOR_HPP */

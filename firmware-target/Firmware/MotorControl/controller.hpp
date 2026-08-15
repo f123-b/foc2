@@ -15,8 +15,8 @@ public:
         float cogging_map[3600];
         bool pre_calibrated = false;
         bool calib_anticogging = false;
-        float calib_pos_threshold = 1.0f;
-        float calib_vel_threshold = 1.0f;
+        float calib_pos_threshold = 2.0f;
+        float calib_vel_threshold = 8.0f;
         float cogging_ratio = 1.0f;
         bool anticogging_enabled = true;
     } Anticogging_t;
@@ -85,6 +85,13 @@ public:
                                         float commanded_velocity) const;
     float velocity_feedback_for_telemetry(float raw_velocity) const;
 
+    // True when the incremental (ABZ) encoder is actually the velocity
+    // feedback source of the cascaded velocity/position loop. Sensorless
+    // control reuses MODE_INCREMENTAL as the encoder placeholder while the
+    // loop is fed from the sensorless observer, so the encoder mode alone is
+    // not sufficient to select the ABZ-specific conditioning.
+    bool cascaded_abz_control() const;
+
     Config_t& config_;
     Axis* axis_ = nullptr; // set by Axis constructor
 
@@ -123,6 +130,9 @@ public:
     // P + I torque actually used by the velocity loop in the previous control
     // cycle. The bidirectional cogging scan samples this rather than I alone.
     float velocity_loop_torque_ = 0.0f;
+    float velocity_proportional_torque_ = 0.0f;
+    float anticogging_torque_ = 0.0f;
+    float final_torque_ = 0.0f;
     LowSpeedCompensator low_speed_compensator_;
     float low_speed_friction_torque_ = 0.0f;
     uint8_t low_speed_compensator_state_ = LowSpeedCompensator::STATE_IDLE;
