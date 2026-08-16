@@ -19,11 +19,12 @@ Windows 上位机通过控制器 USB CDC 接口通信，默认作为独立 Elect
 1. [项目介绍与代码分析](docs/项目介绍与代码分析.md)：项目结构和真实运行边界；
 2. [Source of Truth](docs/SOURCE_OF_TRUTH.md)：实际烧录固件、配置来源和漂移风险；
 3. [控制架构](docs/CONTROL_ARCHITECTURE.md)：编码器、控制器、电流环和 PWM 链路；
-4. [优化计划](docs/OPTIMIZATION_PLAN.md)：后续小步、可回归的改进顺序；
-5. [HIL 测试计划](docs/HIL_TEST_PLAN.md)：实机采数与安全操作要求；
-6. [回归矩阵](docs/REGRESSION_MATRIX.md)：当前基线及待补测试；
-7. [已知问题](docs/KNOWN_ISSUES.md)：按优先级分类的工程风险；
-8. [通信协议](protocol/protocol.md)：USB CDC ASCII 命令说明。
+4. [ABZ 机械测速架构](docs/ABZ_VELOCITY_ESTIMATION.md)：测速估算器职责、数据流与判读方法；
+5. [优化计划](docs/OPTIMIZATION_PLAN.md)：后续小步、可回归的改进顺序；
+6. [HIL 测试计划](docs/HIL_TEST_PLAN.md)：实机采数与安全操作要求；
+7. [回归矩阵](docs/REGRESSION_MATRIX.md)：当前基线及待补测试；
+8. [已知问题](docs/KNOWN_ISSUES.md)：按优先级分类的工程风险；
+9. [通信协议](protocol/protocol.md)：USB CDC ASCII 命令说明。
 
 ## 运行 Windows 桌面版
 
@@ -70,6 +71,31 @@ powershell -ExecutionPolicy Bypass -File tools\build-firmware.ps1
 - `firmware-target/Firmware/build/FOCStudioFirmware.bin`
 
 目标处理器架构为 ARMv7E-M，STM32 Flash 起始地址为 `0x08000000`。
+
+## ABZ 测速验证流程（刷固件后）
+
+前提：ABZ 模式、电机+编码器完整校准完成并已保存；台架空载；限流 2 A；
+随时可急停。测速架构说明见 [ABZ 机械测速架构](docs/ABZ_VELOCITY_ESTIMATION.md)。
+
+1. 连接 FOC Studio，切换到“示波器”页；
+2. 点“速度估算诊断”预设：显示 Velocity Setpoint、Control Velocity、
+   50 ms、100 ms、Raw PLL、M/T 六条曲线；
+3. 依次发送速度指令 0.2 / 0.5 / 1.0 / 1.5 / 2.0 / 3.0 turn/s，
+   每档稳定运行 ≥ 3 秒，同时观察：
+   `velocitySetpoint`、`controlVelocity`、`window50`、`window100`、
+   `rawPLL`、`M/T`、`Iq`、`P torque`、`I torque`、`final torque`；
+4. 判读规则（详见 ABZ_VELOCITY_ESTIMATION.md 第 8 节）：
+   - controlVelocity 波动大而 window50/window100 平 → estimator/observer 问题；
+   - controlVelocity、window50、window100 一起波动 → 真实机械速度波动；
+   - window100 很稳而 window50 有周期 ripple → 高频机械 ripple / cogging；
+   - 所有速度估计都波动且 finalTorque 大幅反向修正 → speed-loop hunting；
+   - deltaCount 异常反向或大 spike（abzCountGlitchCount 增长）→ ABZ 信号完整性问题；
+5. 出现第 4 节 A/D 类现象时：先调
+   `axis0.controller.config.abz_velocity_observer_min_bandwidth`（降噪）
+   或 `..._max_bandwidth`（提速），再轻调 `abz_vel_gain`（先 Kp 后 Ki），
+   Ki 不要回到 0.01 量级；
+6. 正反转、0.05 turn/s 极低速、0 指令停止各验证 ≥ 10 s：极低速不得出现
+   周期性 0/非 0 跳变，停止后所有速度通道应在 1 s 内收敛到 0。
 
 ## 目录结构
 

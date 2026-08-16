@@ -4,7 +4,7 @@
 
 ## 记录内容
 
-以同一时间基准记录 command velocity、filtered velocity（待补 telemetry）、raw PLL velocity、window velocity、Iq setpoint、Iq measured、P torque（待补）、I torque、low-speed torque、total/pre-limit torque（待补）、final limited torque/saturation（待补）、encoder count/delta（待补）、state、position error、low-speed state、blend/bandwidth/limit（待补）。现有 `g` 有其中一部分；缺失字段先作为下一阶段观测性工作，不可从 UI 显示值推断。
+以同一时间基准记录 command velocity、control velocity（observer，即闭环反馈）、raw PLL velocity、50/100 ms window velocity、M/T velocity、observer bandwidth、estimator disagreement、Iq setpoint、Iq measured、P torque、I torque、low-speed torque、total/pre-limit torque、final limited torque/saturation、encoder count/delta、glitch count、state、position error、low-speed state。FOC Studio 的 `g` fast telemetry（56 字段）与 `j` aggregate 已提供这些量；缺失字段先作为下一阶段观测性工作，不可从 UI 显示值推断。
 
 ## 速度场景
 

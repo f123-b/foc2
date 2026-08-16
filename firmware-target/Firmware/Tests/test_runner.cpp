@@ -14,8 +14,8 @@
 #include <communication/can_helpers.hpp>
 #include <incremental_velocity_estimator.hpp>
 #include <friction_compensator.hpp>
-#include <control_velocity_observer.hpp>
-#include <velocity_filter.hpp>
+#include <abz_velocity_observer.hpp>
+#include <abz_velocity_window.hpp>
 
 using std::cout;
 using std::endl;
@@ -104,36 +104,180 @@ TEST_SUITE("velLimiter") {
     }
 }
 
-TEST_SUITE("velocity_feedback_filter") {
-    TEST_CASE("initializes without a kick") {
-        VelocityFeedbackFilter filter;
-        CHECK(filter.update(1.25f, 0.000125f, 15.0f) == doctest::Approx(1.25f));
-        CHECK(filter.initialized());
+TEST_SUITE("abz_velocity_observer") {
+    constexpr float dt = 0.000125f;
+
+    float run_constant_speed(AbzVelocityObserver& obs, float speed,
+                             int cycles) {
+        const float delta = speed * dt;
+        float v = 0.0f;
+        for (int i = 0; i < cycles; ++i)
+            v = obs.update(delta, dt);
+        return v;
     }
 
-    TEST_CASE("attenuates alternating measurement noise") {
-        VelocityFeedbackFilter filter;
-        filter.reset(1.0f);
-        float output = 1.0f;
-        for (int i = 0; i < 400; ++i) {
-            output = filter.update((i & 1) ? 2.0f : 0.0f, 0.000125f, 15.0f);
+    TEST_CASE("converges to a constant speed") {
+        AbzVelocityObserver obs;
+        obs.configure(15.0f, 50.0f);
+        obs.set_bandwidth(obs.bandwidth_for(1.0f));
+        obs.reset(0.0f, 0.0f);
+        CHECK(run_constant_speed(obs, 1.0f, 8000) ==
+                doctest::Approx(1.0f).epsilon(0.01f));
+    }
+
+    TEST_CASE("smooths quantized count input without staircase ripple") {
+        AbzVelocityObserver obs;
+        obs.configure(15.0f, 50.0f);
+        obs.set_bandwidth(obs.bandwidth_for(1.0f));
+        obs.reset(0.0f, 0.0f);
+        // Feed integer-count deltas (0.00025 turn per count at 4000 CPR)
+        // while the rotor moves at 1 turn/s. The observer output must not
+        // reproduce the count staircase.
+        double pos_counts = 0.0;
+        int32_t prev_count = 0;
+        float v = 0.0f;
+        float max_v = 0.0f, min_v = 1e9f;
+        for (int i = 0; i < 16000; ++i) {
+            pos_counts += 1.0 * 4000.0 * (double)dt;
+            const int32_t count = (int32_t)std::floor(pos_counts);
+            const int32_t delta = count - prev_count;
+            prev_count = count;
+            v = obs.update((float)delta / 4000.0f, dt);
+            if (i > 2000) {
+                max_v = std::max(max_v, v);
+                min_v = std::min(min_v, v);
+            }
         }
-        CHECK(output == doctest::Approx(1.0f).epsilon(0.02f));
+        CHECK(v == doctest::Approx(1.0f).epsilon(0.01f));
+        // Peak-to-peak ripple far below a single-count step (~0.125 turn/s
+        // over 2 ms).
+        CHECK(max_v - min_v < 0.05f);
     }
 
-    TEST_CASE("limits a single feedback burst") {
-        VelocityFeedbackFilter filter;
-        filter.reset(0.2f);
-        const float output = filter.update(8.0f, 0.000125f, 12.0f);
-        CHECK(output < 0.21f);
+    TEST_CASE("tracks negative speed") {
+        AbzVelocityObserver obs;
+        obs.configure(15.0f, 50.0f);
+        obs.set_bandwidth(obs.bandwidth_for(1.0f));
+        obs.reset(0.0f, 0.0f);
+        CHECK(run_constant_speed(obs, -1.0f, 8000) ==
+                doctest::Approx(-1.0f).epsilon(0.01f));
     }
 
-    TEST_CASE("converges to a real speed change") {
-        VelocityFeedbackFilter filter;
-        filter.reset(0.0f);
+    TEST_CASE("reset produces no startup spike") {
+        AbzVelocityObserver obs;
+        obs.configure(15.0f, 50.0f);
+        obs.set_bandwidth(obs.bandwidth_for(0.0f));
+        obs.reset(0.0f, 0.0f);
+        const float v = obs.update(0.0f, dt);
+        CHECK(v == 0.0f);
+    }
+
+    TEST_CASE("reset with a stale large position rebases cleanly") {
+        // shadow_count_/CPR can be a large float at reset time; the local
+        // frame must rebase so a huge origin cannot poison the first update.
+        AbzVelocityObserver obs;
+        obs.configure(15.0f, 50.0f);
+        obs.set_bandwidth(obs.bandwidth_for(0.0f));
+        obs.reset(123456.0f, 0.0f);
+        const float v = obs.update(0.0f, dt);
+        CHECK(v == 0.0f);
+        CHECK(std::fabs(obs.position()) < 16.0f);
+    }
+
+    TEST_CASE("reset while moving does not start from zero velocity") {
+        // Entering velocity mode while the rotor spins must seed the observer
+        // with the measured speed: a reset that starts from 0 would create a
+        // large velocity error and a torque impulse.
+        AbzVelocityObserver obs;
+        obs.configure(15.0f, 50.0f);
+        obs.set_bandwidth(obs.bandwidth_for(0.5f));
+        obs.reset(0.0f, 0.5f);   // rotor already moving at 0.5 turn/s
+        float v = obs.update(0.5f * dt, dt);
+        CHECK(v == doctest::Approx(0.5f).epsilon(0.02f));
+        // And it stays there on the next cycle.
+        v = obs.update(0.5f * dt, dt);
+        CHECK(v == doctest::Approx(0.5f).epsilon(0.02f));
+    }
+
+    TEST_CASE("adaptive bandwidth rises with commanded speed") {
+        AbzVelocityObserver obs;
+        obs.configure(10.0f, 60.0f);
+        CHECK(obs.bandwidth_for(0.0f) == doctest::Approx(15.0f));
+        CHECK(obs.bandwidth_for(1.0f) == doctest::Approx(30.0f));
+        CHECK(obs.bandwidth_for(2.0f) == doctest::Approx(40.0f));
+        CHECK(obs.bandwidth_for(4.0f) == doctest::Approx(50.0f));
+        CHECK(obs.bandwidth_for(0.15f) == doctest::Approx(17.5f));
+        // Clamped by the runtime bounds.
+        obs.configure(20.0f, 30.0f);
+        CHECK(obs.bandwidth_for(0.0f) == doctest::Approx(20.0f));
+        CHECK(obs.bandwidth_for(4.0f) == doctest::Approx(30.0f));
+    }
+}
+
+TEST_SUITE("abz_velocity_window") {
+    using Window = AbzVelocityWindowT<800, 400>;
+    constexpr float dt = 0.000125f;
+    constexpr float cpr = 4000.0f;
+
+    TEST_CASE("constant speed reads the commanded speed in both windows") {
+        Window window;
+        // 1 turn/s at 4000 CPR = 0.5 counts per tick -> feed exact deltas.
+        for (int i = 0; i < 800; ++i)
+            window.push((i & 1) ? 1 : 0);
+        CHECK(window.valid50());
+        CHECK(window.valid100());
+        CHECK(window.velocity50(cpr, dt) == doctest::Approx(1.0f).epsilon(0.001f));
+        CHECK(window.velocity100(cpr, dt) == doctest::Approx(1.0f).epsilon(0.001f));
+    }
+
+    TEST_CASE("negative speed is correct") {
+        Window window;
+        for (int i = 0; i < 800; ++i)
+            window.push((i & 1) ? -1 : 0);
+        CHECK(window.velocity50(cpr, dt) == doctest::Approx(-1.0f).epsilon(0.001f));
+        CHECK(window.velocity100(cpr, dt) == doctest::Approx(-1.0f).epsilon(0.001f));
+    }
+
+    TEST_CASE("zero speed reads zero") {
+        Window window;
         for (int i = 0; i < 1600; ++i)
-            filter.update(2.0f, 0.000125f, 15.0f);
-        CHECK(filter.value() == doctest::Approx(2.0f).epsilon(0.01f));
+            window.push(0);
+        CHECK(window.velocity50(cpr, dt) == 0.0f);
+        CHECK(window.velocity100(cpr, dt) == 0.0f);
+    }
+
+    TEST_CASE("not valid until the window fills") {
+        Window window;
+        for (int i = 0; i < 399; ++i)
+            window.push(1);
+        CHECK(!window.valid50());
+        CHECK(!window.valid100());
+        window.push(1);
+        CHECK(window.valid50());
+        CHECK(!window.valid100());
+    }
+
+    TEST_CASE("window is truly sliding: a burst decays out") {
+        Window window;
+        // 1 turn/s for 100 ms, then stop. After the burst fully leaves the
+        // 100 ms window the velocity must read zero again.
+        for (int i = 0; i < 800; ++i)
+            window.push((i & 1) ? 1 : 0);
+        CHECK(window.velocity100(cpr, dt) == doctest::Approx(1.0f).epsilon(0.001f));
+        for (int i = 0; i < 800; ++i)
+            window.push(0);
+        CHECK(window.velocity100(cpr, dt) == 0.0f);
+    }
+
+    TEST_CASE("reset clears everything") {
+        Window window;
+        for (int i = 0; i < 800; ++i)
+            window.push(1);
+        window.reset();
+        CHECK(!window.valid50());
+        CHECK(!window.valid100());
+        CHECK(window.velocity50(cpr, dt) == 0.0f);
+        CHECK(window.velocity100(cpr, dt) == 0.0f);
     }
 }
 
@@ -326,70 +470,6 @@ TEST_SUITE("friction_compensator") {
         CHECK(r.reverse_detected == true);
         CHECK(r.speed_ratio == 0.0f);
         CHECK(r.assist_blend == doctest::Approx(1.0f));
-    }
-}
-
-TEST_SUITE("control_velocity_observer") {
-    constexpr float dt = 0.000125f;
-
-    float run_constant_speed(ControlVelocityObserver& obs, float speed,
-                             int cycles) {
-        double pos = 0.0;
-        float v = 0.0f;
-        for (int i = 0; i < cycles; ++i) {
-            pos += (double)speed * (double)dt;
-            v = obs.update((float)pos, dt);
-        }
-        return v;
-    }
-
-    TEST_CASE("converges to a constant speed") {
-        ControlVelocityObserver obs;
-        obs.configure(30.0f);
-        obs.reset(0.0f);
-        CHECK(run_constant_speed(obs, 1.0f, 8000) ==
-                doctest::Approx(1.0f).epsilon(0.01f));
-    }
-
-    TEST_CASE("smooths quantized count input without staircase ripple") {
-        ControlVelocityObserver obs;
-        obs.configure(30.0f);
-        obs.reset(0.0f);
-        // Feed integer-count position (0.00025 turn per count at 4000 CPR)
-        // while the rotor moves at 1 turn/s. The observer output must not
-        // reproduce the count staircase.
-        double pos_counts = 0.0;
-        float v = 0.0f;
-        float max_v = 0.0f, min_v = 1e9f;
-        for (int i = 0; i < 16000; ++i) {
-            pos_counts += 1.0 * 4000.0 * (double)dt;
-            const int32_t count = (int32_t)std::floor(pos_counts);
-            v = obs.update((float)count / 4000.0f, dt);
-            if (i > 2000) {
-                max_v = std::max(max_v, v);
-                min_v = std::min(min_v, v);
-            }
-        }
-        CHECK(v == doctest::Approx(1.0f).epsilon(0.01f));
-        // Peak-to-peak ripple far below a single-count step (~0.125 turn/s
-        // over 2 ms).
-        CHECK(max_v - min_v < 0.05f);
-    }
-
-    TEST_CASE("tracks negative speed") {
-        ControlVelocityObserver obs;
-        obs.configure(30.0f);
-        obs.reset(0.0f);
-        CHECK(run_constant_speed(obs, -1.0f, 8000) ==
-                doctest::Approx(-1.0f).epsilon(0.01f));
-    }
-
-    TEST_CASE("reset produces no startup spike") {
-        ControlVelocityObserver obs;
-        obs.configure(30.0f);
-        obs.reset(0.0f);
-        const float v = obs.update(0.0f, dt);
-        CHECK(v == 0.0f);
     }
 }
 

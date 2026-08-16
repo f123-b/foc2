@@ -95,11 +95,9 @@ void Controller::reset(bool abort_anticogging) {
     vel_setpoint_ = 0.0f;
     vel_integrator_torque_ = 0.0f;
     torque_setpoint_ = 0.0f;
-    abz_velocity_feedback_filter_.clear();
     velocity_control_feedback_ = 0.0f;
     velocity_control_feedback_valid_ = false;
     overspeed_violation_count_ = 0;
-    raw_overspeed_lead_count_ = 0;
     velocity_loop_torque_ = 0.0f;
     velocity_proportional_torque_ = 0.0f;
     anticogging_torque_ = 0.0f;
@@ -122,6 +120,9 @@ void Controller::reset(bool abort_anticogging) {
     friction_reverse_detected_ = false;
     control_observer_velocity_ = 0.0f;
     control_observer_valid_ = false;
+    observer_bandwidth_ = 0.0f;
+    velocity_estimator_disagreement_ = 0.0f;
+    abz_count_glitch_count_ = 0;
     position_error_ = 0.0f;
     position_low_speed_active_ = false;
 }
@@ -134,9 +135,9 @@ void Controller::set_error(Error error) {
 float Controller::velocity_feedback_for_control(float raw_velocity,
                                                 float commanded_velocity) const {
     (void)commanded_velocity;
-    // ABZ velocity/position control closes on the low-bandwidth control
+    // ABZ velocity/position control closes on the ABZ mechanical velocity
     // observer; every other feedback source (torque, sensorless, SPI) uses the
-    // PLL velocity directly.
+    // encoder PLL velocity directly.  This is the ONLY ABZ velocity feedback.
     if (cascaded_abz_control() && control_observer_valid_) {
         return control_observer_velocity_;
     }
@@ -339,6 +340,16 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                             std::abs(vel_estimate - scan_speed) <= tolerance);
             if (!velocity_ok) {
                 ++anticogging_rejected_velocity_samples_;
+                return false;
+            }
+            // Secondary sanity check: reject the sample while the control
+            // observer and the 50 ms mechanical window disagree by more than
+            // the scan tolerance. A bad estimator must not be written into the
+            // cogging map; this never faults, it only rejects samples.
+            if (axis_->encoder_.velocity_window_50ms_valid_ &&
+                    std::abs(control_observer_velocity_ -
+                            axis_->encoder_.velocity_window_50ms_) > tolerance) {
+                ++anticogging_rejected_estimator_samples_;
                 return false;
             }
             if (friction_reverse_detected_) {
@@ -955,24 +966,64 @@ bool Controller::update(float* torque_setpoint_output) {
         vel_integrator_gain = std::max(0.0f, config_.abz_vel_integrator_gain);
     }
 
-    // Low-bandwidth control velocity observer. It tracks the raw ABZ count
-    // position and produces the smooth velocity the PI closes on. The M/T
-    // estimator is only a diagnostic, and the encoder PLL stays untouched for
+    // ABZ mechanical velocity observer: the SINGLE velocity feedback source of
+    // the ABZ velocity PI.  It is fed the per-tick delta position (delta_count
+    // / CPR) so it is immune to int32 shadow-count overflow and never loses
+    // float precision over long runs.  Its bandwidth follows the commanded
+    // speed (adaptive, smooth interpolation) with gains recomputed only when
+    // the bandwidth actually changes.  The M/T estimator and the 50/100 ms
+    // windows stay diagnostics; the encoder PLL stays untouched for
     // commutation / phase interpolation / safety.
     if (cascaded_abz_mode) {
-        const float observer_position =
-                (float)axis_->encoder_.shadow_count_ /
-                        (float)std::max<int32_t>(1, axis_->encoder_.config_.cpr);
-        control_velocity_observer_.configure(
-                config_.control_velocity_observer_bandwidth);
-        if (!control_observer_valid_)
-            control_velocity_observer_.reset(observer_position);
-        control_observer_velocity_ = control_velocity_observer_.update(
-                observer_position, current_meas_period);
+        const int32_t cpr = std::max<int32_t>(1, axis_->encoder_.config_.cpr);
+        abz_velocity_observer_.configure(
+                config_.abz_velocity_observer_min_bandwidth,
+                config_.abz_velocity_observer_max_bandwidth);
+        abz_velocity_observer_.set_bandwidth(
+                abz_velocity_observer_.bandwidth_for(std::fabs(vel_des)));
+        observer_bandwidth_ = abz_velocity_observer_.bandwidth();
+        if (!control_observer_valid_) {
+            // Initialize while the rotor may be moving: seed the velocity from
+            // the best available estimator so switching into velocity mode
+            // does not start the loop from zero and produce a torque impulse.
+            float initial_velocity = 0.0f;
+            if (axis_->encoder_.velocity_window_50ms_valid_)
+                initial_velocity = axis_->encoder_.velocity_window_50ms_;
+            else if (axis_->encoder_.mt_velocity_estimator_.valid())
+                initial_velocity = axis_->encoder_.mt_velocity_estimate_;
+            abz_velocity_observer_.reset(
+                    (float)axis_->encoder_.shadow_count_ / (float)cpr,
+                    initial_velocity);
+        }
+        const float delta_position =
+                (float)axis_->encoder_.last_delta_count_ / (float)cpr;
+        control_observer_velocity_ = abz_velocity_observer_.update(
+                delta_position, current_meas_period);
         control_observer_valid_ = true;
+
+        // Estimator agreement diagnostic: control observer vs 50 ms window.
+        // A large disagreement means the estimators disagree (see
+        // docs/ABZ_VELOCITY_ESTIMATION.md); it never affects control.
+        velocity_estimator_disagreement_ =
+                axis_->encoder_.velocity_window_50ms_valid_
+                ? control_observer_velocity_ - axis_->encoder_.velocity_window_50ms_
+                : 0.0f;
+
+        // Abnormal count detection (diagnostic only, never faults): a single
+        // control tick whose |delta| exceeds 3x the physically expected counts
+        // at the commanded speed is a likely ABZ signal-integrity glitch.
+        const float expected_counts_per_tick =
+                std::max(std::fabs(vel_des), 1.0f) *
+                (float)cpr * current_meas_period;
+        const int32_t glitch_threshold = std::max(
+                (int32_t)2, (int32_t)(expected_counts_per_tick * 3.0f + 0.999f));
+        if (std::abs(axis_->encoder_.last_delta_count_) > glitch_threshold)
+            ++abz_count_glitch_count_;
     } else {
         control_observer_velocity_ = 0.0f;
         control_observer_valid_ = false;
+        observer_bandwidth_ = 0.0f;
+        velocity_estimator_disagreement_ = 0.0f;
     }
 
     if (axis_->motor_.config_.motor_type == Motor::MOTOR_TYPE_ACIM) {
@@ -1042,9 +1093,9 @@ bool Controller::update(float* torque_setpoint_output) {
             return false;
         }
 
-        // Single feedback source: the count-time estimate for ABZ velocity and
-        // position control, the PLL everywhere else. No second filter, no raw
-        // PLL overspeed lead, no gain schedule.
+        // Single feedback source: the ABZ mechanical velocity observer for ABZ
+        // velocity/position control, the encoder PLL everywhere else.  No
+        // second filter, no raw PLL overspeed lead, no gain schedule.
         const float velocity_feedback = velocity_feedback_for_control(
                 *vel_estimate_src, vel_des);
         velocity_control_feedback_ = velocity_feedback;
@@ -1114,7 +1165,6 @@ bool Controller::update(float* torque_setpoint_output) {
         }
         torque_unsaturated += low_speed_friction_torque_;
     } else {
-        abz_velocity_feedback_filter_.clear();
         velocity_control_feedback_valid_ = false;
         velocity_error_ = 0.0f;
         velocity_loop_torque_ = 0.0f;

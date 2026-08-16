@@ -710,9 +710,14 @@ interfaces:
           abz_vel_integrator_gain:
             type: float32
             unit: Nm/(turn/s * s)
-          control_velocity_observer_bandwidth:
+          abz_velocity_observer_min_bandwidth:
             type: float32
             unit: Hz
+            doc: Lower bound of the adaptive ABZ mechanical velocity observer bandwidth.
+          abz_velocity_observer_max_bandwidth:
+            type: float32
+            unit: Hz
+            doc: Upper bound of the adaptive ABZ mechanical velocity observer bandwidth.
           abz_velocity_torque_limit:
             type: float32
             unit: Nm

@@ -5,9 +5,8 @@
 #error "This file should not be included directly. Include odrive_main.h instead."
 #endif
 
-#include "velocity_filter.hpp"
 #include "friction_compensator.hpp"
-#include "control_velocity_observer.hpp"
+#include "abz_velocity_observer.hpp"
 
 class Controller : public ODriveIntf::ControllerIntf {
 public:
@@ -48,11 +47,17 @@ public:
         // velocity loop so static friction can be broken without raising Kp.
         bool enable_low_speed_compensation = true;
         // ABZ-specific velocity PI gains (the generic vel_gain/vel_integrator
-        // gain are not suitable for the 4000 CPR incremental encoder).
+        // gain are not suitable for the 4000 CPR incremental encoder).  These
+        // two gains are the ONLY velocity PI gains used by the ABZ velocity
+        // loop, and FOC Studio must write exactly these when tuning ABZ.
         float abz_vel_gain = 0.002f;                 // [Nm/(turn/s)]
         float abz_vel_integrator_gain = 0.002f;      // [Nm/(turn/s * s)]
-        // Bandwidth of the control velocity observer in Hz (tunable 20..80 Hz).
-        float control_velocity_observer_bandwidth = 40.0f;
+        // Control velocity observer adaptive bandwidth bounds [Hz].  The
+        // observer bandwidth follows the commanded speed (see
+        // AbzVelocityObserver): ~15 Hz at standstill rising smoothly to
+        // ~50 Hz at 4 turn/s, clamped to these two values.
+        float abz_velocity_observer_min_bandwidth = 15.0f;
+        float abz_velocity_observer_max_bandwidth = 50.0f;
         // ABZ velocity-loop torque limit [Nm], applied to P+I+FF before the
         // motor global torque limit. <= 0 or non-finite disables it.
         float abz_velocity_torque_limit = 0.015f;
@@ -165,16 +170,14 @@ public:
     float input_filter_kp_ = 0.0f;
     float input_filter_ki_ = 0.0f;
 
-    // Runtime diagnostics for the FOC Studio speed command. The encoder PLL
+    // Runtime diagnostics for the FOC Studio speed command.  The encoder PLL
     // remains untouched for torque control, commutation and safety checks.
-    VelocityFeedbackFilter abz_velocity_feedback_filter_;
     float velocity_control_feedback_ = 0.0f;
     bool velocity_control_feedback_valid_ = false;
     // Overspeed is safety-critical, but a single ABZ edge/PLL impulse must
     // not abort a running scan or speed command. Require a short consecutive
     // violation window before latching the controller fault.
     uint16_t overspeed_violation_count_ = 0;
-    uint8_t raw_overspeed_lead_count_ = 0;
     // P + I torque actually used by the velocity loop in the previous control
     // cycle. The bidirectional cogging scan samples this rather than I alone.
     float velocity_loop_torque_ = 0.0f;
@@ -200,9 +203,21 @@ public:
     float friction_recovery_timer_ = 0.0f;
     float friction_forward_velocity_ = 0.0f;
     bool friction_reverse_detected_ = false;
-    ControlVelocityObserver control_velocity_observer_;
+    // ABZ mechanical velocity observer: the SINGLE feedback source of the ABZ
+    // velocity PI.  Fed with per-tick delta position; adaptive bandwidth.
+    AbzVelocityObserver abz_velocity_observer_;
     float control_observer_velocity_ = 0.0f;   // [turn/s]
     bool control_observer_valid_ = false;
+    // Effective observer bandwidth of the most recent control cycle [Hz].
+    float observer_bandwidth_ = 0.0f;
+    // Diagnostic: control observer velocity minus 50 ms window velocity
+    // [turn/s].  |value| >> 0 means the estimators disagree (see
+    // docs/ABZ_VELOCITY_ESTIMATION.md for how to read it).
+    float velocity_estimator_disagreement_ = 0.0f;
+    // Diagnostic: number of control ticks whose |delta_enc| exceeded the
+    // physically plausible bound (3x the expected counts per tick at the
+    // commanded speed).  Pure telemetry; never faults.
+    uint32_t abz_count_glitch_count_ = 0;
     float position_error_ = 0.0f;
     bool position_low_speed_active_ = false;
 
@@ -257,6 +272,7 @@ public:
     uint32_t anticogging_rejected_reverse_samples_ = 0;
     uint32_t anticogging_rejected_state_samples_ = 0;
     uint32_t anticogging_rejected_saturation_samples_ = 0;
+    uint32_t anticogging_rejected_estimator_samples_ = 0;
     float anticogging_map_rms_ = 0.0f;
     float anticogging_map_peak_to_peak_ = 0.0f;
     float anticogging_map_max_jump_ = 0.0f;

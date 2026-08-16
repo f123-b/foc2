@@ -6,6 +6,7 @@
 #endif
 
 #include "incremental_velocity_estimator.hpp"
+#include "abz_velocity_window.hpp"
 
 
 class Encoder : public ODriveIntf::EncoderIntf {
@@ -81,24 +82,44 @@ public:
     float pos_estimate_counts_ = 0.0f;  // [count]
     float pos_cpr_counts_ = 0.0f;  // [count]
     float vel_estimate_counts_ = 0.0f;  // [count/s]
-    // Rolling 50 ms count-window estimator used only by the ABZ velocity
-    // controller. Position, commutation and safety keep using the PLL state.
+    // Mechanical velocity diagnostics (ABZ incremental mode only).  These are
+    // deliberately separate from the PLL state, which keeps driving
+    // commutation, phase interpolation and the safety checks:
     //
-    // At 4000 CPR, a 15 ms window quantises low-speed feedback in steps of
-    // roughly 0.0167 turn/s and produces visible edge bursts below 2 turn/s.
-    // The longer window reduces that step to about 0.005 turn/s while the
-    // outer velocity filter keeps the added observation delay bounded.
-    static constexpr uint16_t incremental_velocity_window_samples_ = 400;
-    int32_t incremental_velocity_delta_history_[incremental_velocity_window_samples_] = {};
-    uint16_t incremental_velocity_history_index_ = 0;
-    uint16_t incremental_velocity_history_count_ = 0;
-    int32_t incremental_window_delta_count_ = 0;
-    float incremental_window_velocity_ = 0.0f;
-    bool incremental_window_velocity_valid_ = false;
-    // Count-time estimator for the velocity/position controller only.  The PLL
-    // state above continues to drive commutation and phase interpolation.
-    IncrementalVelocityEstimator incremental_velocity_estimator_;
-    float control_velocity_estimate_ = 0.0f;  // [turn/s] (M/T diagnostic)
+    //   * velocity_window_50ms_  -> fast mechanical diagnostic reference
+    //   * velocity_window_100ms_ -> steady-state mechanical reference
+    //   * mt_velocity_estimate_  -> M/T (count-time) edge diagnostic
+    //
+    // The windows are true sliding windows updated every control tick, derived
+    // from current_meas_hz at compile time.  At the nominal 8 kHz current loop
+    // the 50 ms window is 400 ticks and the 100 ms window is 800 ticks; both
+    // share a single 800-slot ring buffer (3.2 KiB at 4000 CPR).
+    static constexpr uint16_t kMechanicalWindowSamples100 =
+            static_cast<uint16_t>(current_meas_hz / 10);   // 100 ms
+    static constexpr uint16_t kMechanicalWindowSamples50 =
+            static_cast<uint16_t>(current_meas_hz / 20);   // 50 ms
+    static_assert(kMechanicalWindowSamples100 == 2 * kMechanicalWindowSamples50,
+                  "The 100 ms mechanical window must be exactly two 50 ms windows "
+                  "(change the sample derivation if current_meas_hz changes)");
+    static_assert(kMechanicalWindowSamples100 > 0 && kMechanicalWindowSamples50 > 0,
+                  "Mechanical window sizes must be non-zero");
+
+    AbzVelocityWindowT<kMechanicalWindowSamples100, kMechanicalWindowSamples50>
+            mechanical_velocity_window_;
+    float velocity_window_50ms_ = 0.0f;   // [turn/s]
+    float velocity_window_100ms_ = 0.0f;  // [turn/s]
+    bool velocity_window_50ms_valid_ = false;
+    bool velocity_window_100ms_valid_ = false;
+    // Unwrapped 64-bit mechanical count for diagnostics / observer / position
+    // tracking.  shadow_count_ (int32) can overflow after hours of continuous
+    // running at 4000 CPR; this counter never wraps in practice and costs one
+    // addition per control tick.  The fast int32 hardware/electrical path is
+    // untouched.
+    int64_t mechanical_count_ = 0;
+    // M/T (count-time) edge diagnostic estimator.  The PLL state above drives
+    // commutation; this estimator only analyses low-speed encoder edges.
+    IncrementalVelocityEstimator mt_velocity_estimator_;
+    float mt_velocity_estimate_ = 0.0f;  // [turn/s] (M/T diagnostic)
     int32_t last_delta_count_ = 0;             // per-cycle count delta
     float pll_kp_ = 0.0f;   // [count/s / count]
     float pll_ki_ = 0.0f;   // [(count/s^2) / count]
@@ -133,16 +154,16 @@ public:
     uint32_t abs_spi_cr1;
     uint32_t abs_spi_cr2;
 
-    void reset_incremental_velocity_window() {
-        for (uint16_t i = 0; i < incremental_velocity_window_samples_; ++i)
-            incremental_velocity_delta_history_[i] = 0;
-        incremental_velocity_history_index_ = 0;
-        incremental_velocity_history_count_ = 0;
-        incremental_window_delta_count_ = 0;
-        incremental_window_velocity_ = 0.0f;
-        incremental_window_velocity_valid_ = false;
-        incremental_velocity_estimator_.reset();
-        control_velocity_estimate_ = 0.0f;
+    void reset_mechanical_velocity_estimators() {
+        mechanical_velocity_window_.reset();
+        velocity_window_50ms_ = 0.0f;
+        velocity_window_100ms_ = 0.0f;
+        velocity_window_50ms_valid_ = false;
+        velocity_window_100ms_valid_ = false;
+        mechanical_count_ = 0;
+        mt_velocity_estimator_.reset();
+        mt_velocity_estimate_ = 0.0f;
+        last_delta_count_ = 0;
     }
 
     constexpr float getCoggingRatio(){

@@ -511,40 +511,33 @@ bool Encoder::update() {
     count_in_cpr_ = mod(count_in_cpr_, config_.cpr);
 
     if (mode_ == MODE_INCREMENTAL) {
-        // A rolling 50 ms window updates every control tick. The longer
-        // horizon gives 0.2--1.5 turn/s enough encoder edges for a useful
-        // feedback value and removes the one-window-to-the-next speed jumps
-        // that caused the sub-2 turn/s burst.
-        const uint16_t index = incremental_velocity_history_index_;
-        incremental_window_delta_count_ -= incremental_velocity_delta_history_[index];
-        incremental_velocity_delta_history_[index] = delta_enc;
-        incremental_window_delta_count_ += delta_enc;
-        incremental_velocity_history_index_ =
-                (index + 1u) % incremental_velocity_window_samples_;
-        if (incremental_velocity_history_count_ < incremental_velocity_window_samples_)
-            ++incremental_velocity_history_count_;
-
-        const float elapsed = incremental_velocity_history_count_ * current_meas_period;
-        if (elapsed > 0.0f) {
-            incremental_window_velocity_ =
-                    static_cast<float>(incremental_window_delta_count_) /
-                    (static_cast<float>(config_.cpr) * elapsed);
-        }
-        incremental_window_velocity_valid_ =
-                incremental_velocity_history_count_ >= incremental_velocity_window_samples_;
-    } else if (incremental_velocity_history_count_ > 0) {
-        reset_incremental_velocity_window();
+        // Dual 50 ms / 100 ms true sliding windows sharing one ring buffer,
+        // updated every control tick (no periodic 50/100 ms refresh).  These
+        // are mechanical diagnostics only: position, commutation, phase
+        // interpolation and the safety checks keep using the PLL state below.
+        mechanical_count_ += delta_enc;
+        mechanical_velocity_window_.push(delta_enc);
+        velocity_window_50ms_ = mechanical_velocity_window_.velocity50(
+                (float)config_.cpr, current_meas_period);
+        velocity_window_100ms_ = mechanical_velocity_window_.velocity100(
+                (float)config_.cpr, current_meas_period);
+        velocity_window_50ms_valid_ = mechanical_velocity_window_.valid50();
+        velocity_window_100ms_valid_ = mechanical_velocity_window_.valid100();
+    } else if (mechanical_velocity_window_.count100() > 0 || mechanical_count_ != 0) {
+        reset_mechanical_velocity_estimators();
     }
 
-    // Count-time estimator used only by the velocity/position controller.
+    // M/T (count-time) edge diagnostic.  The ABZ velocity loop closes on the
+    // control velocity observer (see Controller::update); this estimator only
+    // analyses low-speed encoder edges / abnormal counts.
     if (mode_ == MODE_INCREMENTAL) {
         last_delta_count_ = delta_enc;
-        control_velocity_estimate_ = incremental_velocity_estimator_.update(
+        mt_velocity_estimate_ = mt_velocity_estimator_.update(
                 delta_enc, current_meas_period, (float)config_.cpr);
     } else {
         last_delta_count_ = 0;
-        incremental_velocity_estimator_.reset();
-        control_velocity_estimate_ = 0.0f;
+        mt_velocity_estimator_.reset();
+        mt_velocity_estimate_ = 0.0f;
     }
 
     if(mode_ & MODE_FLAG_ABS)

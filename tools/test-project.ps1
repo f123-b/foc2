@@ -12,6 +12,18 @@ try {
     Pop-Location
 }
 
+# ABZ mechanical velocity estimator algorithm tests (host-compiled from the
+# exact firmware headers; no STM32 dependencies).
+Push-Location (Join-Path $projectRoot 'firmware-target\Firmware\Tests')
+try {
+    & g++ -std=c++17 -O2 -Wall -I ..\MotorControl test_velocity_estimators.cpp -o test_velocity_estimators.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Estimator test compile failed.' }
+    & .\test_velocity_estimators.exe
+    if ($LASTEXITCODE -ne 0) { throw 'ABZ velocity estimator tests failed.' }
+} finally {
+    Pop-Location
+}
+
 $portableFirmwareRoot = Join-Path $projectRoot 'firmware'
 $portableBuildRoot = Join-Path $portableFirmwareRoot 'build-host'
 & cmake.exe -S $portableFirmwareRoot -B $portableBuildRoot

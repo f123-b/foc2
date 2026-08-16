@@ -5,10 +5,12 @@
 #include <cmath>
 #include <cstdint>
 
-// Count-time (M/T) velocity estimator for the ABZ velocity/position
-// controller.  It is deliberately independent of the encoder PLL so that the
-// FOC electrical angle, phase interpolation and commutation paths keep using
-// the PLL exactly as before.
+// Count-time (M/T) velocity estimator.  It is a DIAGNOSTIC estimator for the
+// ABZ encoder: the FOC electrical angle / phase interpolation / commutation
+// keep using the encoder PLL, and the ABZ velocity PI closes on
+// AbzVelocityObserver.  This estimator is used to analyze low-speed encoder
+// edges, to compare against the observer and the rolling windows, and to
+// detect abnormal count behaviour.
 //
 // Each control tick it accumulates the wrapped encoder count delta and the
 // elapsed time, then publishes
@@ -20,11 +22,18 @@
 // publishes the previous estimate is held, so a single control tick without an
 // encoder edge never reads as velocity == 0.
 //
-// The publish threshold is not a fixed speed: at low speed it waits for a few
-// real counts, while at higher speed it is raised proportionally so the
-// publish interval does not collapse below a minimum time and amplify
-// count-arrival timing jitter.  The output is slew limited so a single
-// erroneous count cannot become a large velocity spike.
+// Zero-speed behaviour (important at low speed): with a fixed
+// max_publish_time, a slow rotor that produces no edge inside one publish
+// interval would periodically publish 0 and make the trace flicker
+// "0 -> non-zero -> 0".  Instead:
+//   * while edges are still EXPECTED (time since last edge is below a
+//     speed-dependent timeout of ~4x the expected edge interval), a publish
+//     with zero accumulated counts HOLDS the previous estimate;
+//   * once the edge timeout is exceeded (the rotor has genuinely stopped or
+//     slowed far below the last estimate), the velocity decays exponentially
+//     toward zero instead of snapping.
+// The hold/decay never fabricates a sustained speed: the decay reaches <0.1 %
+// of the last estimate within ~0.7 s and clamps to exactly 0.
 class IncrementalVelocityEstimator {
 public:
     struct Config {
@@ -42,6 +51,18 @@ public:
         // bounds the estimator phase response.
         float max_velocity_slew = 100.0f;
     };
+
+    // Multiplier on the expected edge interval before the rotor is declared
+    // idle and the estimate starts decaying toward zero.
+    static constexpr float kEdgeTimeoutRatio = 4.0f;
+    // Floor of the edge timeout so the decay never triggers on sub-millisecond
+    // edge intervals of a fast rotor.
+    static constexpr float kEdgeTimeoutMin = 0.030f;   // [s]
+    // Exponential decay time constant once idle [s]: reaches ~0.1 % of the
+    // last estimate in ~0.7 s.
+    static constexpr float kDecayTau = 0.100f;         // [s]
+    // Estimates below this magnitude are snapped to exactly zero.
+    static constexpr float kZeroFloor = 1e-4f;         // [turn/s]
 
     void reset() {
         count_accum_ = 0;
@@ -61,6 +82,34 @@ public:
         time_accum_ += dt;
         time_since_last_edge_ = (delta_count != 0) ? 0.0f : time_since_last_edge_ + dt;
 
+        // Speed-dependent edge timeout: Tedge = 1 / (CPR * |v|).  Once the
+        // time since the last edge exceeds ~4x Tedge (with a floor), the rotor
+        // is treated as stopped relative to the last estimate and the estimate
+        // decays smoothly to zero.
+        const float speed = std::fabs(velocity_);
+        const float expected_edge_interval = (speed > 1e-4f)
+                ? 1.0f / (cpr * speed) : 1.0f;
+        const float edge_timeout = std::max(
+                kEdgeTimeoutMin, kEdgeTimeoutRatio * expected_edge_interval);
+        if (time_since_last_edge_ >= edge_timeout) {
+            if (speed > 0.0f) {
+                // First-order exponential decay toward zero:
+                //   v *= exp(-dt / tau)  ≈  v * (1 - dt / tau)
+                // dt/tau is ~0.00125 at 8 kHz with tau = 0.1 s, so the
+                // approximation error is < 1e-6 relative and no exp() call is
+                // needed inside the control loop.
+                const float decay = 1.0f - dt * (1.0f / kDecayTau);
+                velocity_ *= (decay > 0.0f) ? decay : 0.0f;
+                if (std::fabs(velocity_) < kZeroFloor)
+                    velocity_ = 0.0f;
+            }
+            // Discard the stale accumulation so a later restart publishes a
+            // fresh interval instead of one that includes the idle period.
+            count_accum_ = 0;
+            time_accum_ = 0.0f;
+            return velocity_;
+        }
+
         // Speed-scaled publish threshold: raise the count requirement so the
         // publish interval stays at least min_publish_time at higher speeds.
         const float counts_for_min_time =
@@ -74,6 +123,15 @@ public:
                 time_accum_ >= config_.max_publish_time;
 
         if (publish && time_accum_ > 0.0f) {
+            if (count_accum_ == 0) {
+                // No counts in this interval but edges are still expected (the
+                // edge timeout above has not fired).  Publish nothing: holding
+                // the previous estimate avoids the 0 / non-zero flicker that a
+                // raw 0 publish would produce at low speed.
+                count_accum_ = 0;
+                time_accum_ = 0.0f;
+                return velocity_;
+            }
             const float raw = static_cast<float>(count_accum_) / (cpr * time_accum_);
             const float max_delta = config_.max_velocity_slew * time_accum_;
             velocity_ += std::clamp(raw - velocity_, -max_delta, max_delta);

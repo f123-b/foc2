@@ -1,7 +1,7 @@
 import {
   AXIS_STATE, CONTROL_MODE, LineParser, MODE, command, decodeFaults, encodeCommand,
   faultSummary, parseFastTelemetry, parseTelemetry,
-} from './protocol.js?v=abz-low-speed-v3';
+} from './protocol.js?v=abz-velocity-arch-v4';
 
 const state = {
   transport: 'disconnected',
@@ -13,8 +13,18 @@ const state = {
   fault: 0,
   velocity: 0,
   velocitySetpoint: 0,
+  controlVelocity: 0,
+  encoderPllVelocity: 0,
+  velocityWindow50ms: 0,
+  velocityWindow100ms: 0,
+  observerVelocity: 0,
+  observerBandwidth: 0,
+  velocityEstimatorDisagreement: 0,
+  abzCountGlitchCount: 0,
   rawVelocity: 0,
   windowVelocity: 0,
+  mtVelocity: 0,
+  controlObserverVelocity: 0,
   current: 0,
   position: 0,
   positionSetpoint: 0,
@@ -111,7 +121,7 @@ const dom = Object.fromEntries([
   'currentModeBadge', 'safeProfileButton', 'scopeRunButton', 'scopeClearButton',
   'scopeAutoScaleButton', 'scopeWindowSelect', 'scopeCaptureState', 'scopeSampleRate',
   'scopePresetVelocityButton', 'scopePresetCurrentButton', 'scopePresetLowSpeedButton',
-  'scopePresetCoggingButton',
+  'scopePresetCoggingButton', 'scopePresetEstimationButton', 'scopePresetLoopButton',
   'scopeWindowLabel', 'scopeWindowEndLabel', 'scopeRunIndicator', 'scopeAxisMin',
   'scopeAxisMax', 'scopeAxisApplyButton', 'scopeAxisResetButton', 'scopeMeasurements',
   'scopeSelectionBox', 'scopeCursorTooltip', 'consoleChartLegend',
@@ -133,7 +143,8 @@ const foc3505Tuning = Object.freeze({
   'axis0.encoder.config.bandwidth': '100',
   'axis0.controller.config.abz_vel_gain': '0.002',
   'axis0.controller.config.abz_vel_integrator_gain': '0.002',
-  'axis0.controller.config.control_velocity_observer_bandwidth': '40',
+  'axis0.controller.config.abz_velocity_observer_min_bandwidth': '15',
+  'axis0.controller.config.abz_velocity_observer_max_bandwidth': '50',
   'axis0.controller.config.abz_velocity_torque_limit': '0.015',
   'axis0.controller.config.abz_coulomb_friction_torque': '0.0015',
   'axis0.controller.config.abz_breakaway_torque': '0.0055',
@@ -522,7 +533,13 @@ function makeMockStatus() {
     idMeasured: running ? Math.sin(performance.now() / 89) * 0.02 : 0,
     iqSetpoint, idSetpoint: 0,
     velocitySetpoint: target, rawVelocity: velocity,
-    windowVelocity: velocity, velocityIntegratorTorque: 0,
+    velocityWindow50ms: velocity, velocityWindow100ms: velocity,
+    encoderPllVelocity: velocity, observerVelocity: velocity,
+    observerBandwidth: state.mode === MODE.ABZ ? 15 + Math.min(35, Math.abs(target) * 10) : 0,
+    velocityEstimatorDisagreement: Math.sin(performance.now() / 300) * 0.004,
+    abzCountGlitchCount: 0,
+    windowVelocity: velocity, controlObserverVelocity: velocity,
+    velocityIntegratorTorque: 0,
     lowSpeedTorque: 0, positionSetpoint: mockPositionTarget,
     positionError: mockPositionTarget - nextPosition, lowSpeedState: 1,
     observerLocked: isSensorless() && Math.abs(velocity) > 5,
@@ -849,7 +866,7 @@ function loadSafeProfile() {
   writableConfigInputs.forEach((input) => {
     if (foc3505Tuning[input.dataset.config] !== undefined) input.value = foc3505Tuning[input.dataset.config];
   });
-  dom.configStatus.textContent = '已填入已验证的基础参数：编码器带宽 100、速度增益 0.0015、积分 0.005、速度斜坡 0.3、位置增益 0.8、电流环 500 rad/s。请先读取设备，再写入；速度反馈低通只在速度模式临时启用。';
+  dom.configStatus.textContent = '已填入已验证的基础参数：编码器带宽 100、速度增益 0.0015、积分 0.005、速度斜坡 0.3、位置增益 0.8、电流环 500 rad/s。请先读取设备，再写入；ABZ 速度环使用 abz_vel_gain/abz_vel_integrator_gain 与自适应测速 observer。';
 }
 
 function updateCalibrationState() {
@@ -894,12 +911,21 @@ function renderFaults() {
 }
 
 const chartSeries = Object.freeze({
-  velocity: { label: '速度', color: '#1479ff', floor: 0.1, unit: 'turn/s' },
+  velocity: { label: '速度（控制反馈）', color: '#1479ff', floor: 0.1, unit: 'turn/s' },
+  controlVelocity: { label: '控制反馈速度', color: '#1479ff', floor: 0.1, unit: 'turn/s' },
   velocitySetpoint: { label: '速度给定', color: '#2f9e75', floor: 0.1, unit: 'turn/s', dashed: true },
+  encoderPllVelocity: { label: 'PLL 原始速度', color: '#d9485f', floor: 0.1, unit: 'turn/s' },
   rawVelocity: { label: 'PLL 原始速度', color: '#d9485f', floor: 0.1, unit: 'turn/s' },
-  windowVelocity: { label: 'ABZ 窗口速度', color: '#008b8b', floor: 0.1, unit: 'turn/s' },
+  velocityWindow50ms: { label: '50 ms 窗口速度', color: '#008b8b', floor: 0.1, unit: 'turn/s' },
+  windowVelocity: { label: '50 ms 窗口速度', color: '#008b8b', floor: 0.1, unit: 'turn/s' },
+  velocityWindow100ms: { label: '100 ms 窗口速度', color: '#0d9488', floor: 0.1, unit: 'turn/s' },
+  mtVelocity: { label: 'M/T 速度', color: '#94a3b8', floor: 0.1, unit: 'turn/s' },
   mTVelocity: { label: 'M/T 速度', color: '#94a3b8', floor: 0.1, unit: 'turn/s' },
-  controlObserverVelocity: { label: '控制速度 observer', color: '#f59e0b', floor: 0.1, unit: 'turn/s' },
+  observerVelocity: { label: '控制 observer 速度', color: '#f59e0b', floor: 0.1, unit: 'turn/s' },
+  controlObserverVelocity: { label: '控制 observer 速度', color: '#f59e0b', floor: 0.1, unit: 'turn/s' },
+  observerBandwidth: { label: 'observer 带宽', color: '#a78bfa', floor: 1, unit: 'Hz' },
+  velocityEstimatorDisagreement: { label: '估算器分歧（控制-50ms）', color: '#f43f5e', floor: 0.01, unit: 'turn/s' },
+  abzCountGlitchCount: { label: 'ABZ 计数毛刺', color: '#fb923c', floor: 1, unit: 'count' },
   position: { label: '位置', color: '#7c5ce7', floor: 0.1, unit: 'turn' },
   positionSetpoint: { label: '轨迹位置', color: '#d07a00', floor: 0.1, unit: 'turn', dashed: true },
   positionTarget: { label: '目标位置', color: '#2f9e75', floor: 0.1, unit: 'turn', dashed: true },
@@ -938,11 +964,20 @@ function captureTelemetrySample() {
   state.history.push({
     time: performance.now(),
     velocity: state.velocity,
+    controlVelocity: state.controlVelocity,
     velocitySetpoint: state.velocitySetpoint,
+    encoderPllVelocity: state.encoderPllVelocity,
     rawVelocity: state.rawVelocity,
+    velocityWindow50ms: state.velocityWindow50ms,
     windowVelocity: state.windowVelocity,
+    velocityWindow100ms: state.velocityWindow100ms,
+    mtVelocity: state.mtVelocity,
     mTVelocity: state.mTVelocity,
+    observerVelocity: state.observerVelocity,
     controlObserverVelocity: state.controlObserverVelocity,
+    observerBandwidth: state.observerBandwidth,
+    velocityEstimatorDisagreement: state.velocityEstimatorDisagreement,
+    abzCountGlitchCount: state.abzCountGlitchCount,
     position: state.position,
     positionSetpoint: state.positionSetpoint,
     positionError: state.positionError,
@@ -1480,7 +1515,7 @@ function bindActions() {
     drawCharts();
   }
   dom.scopePresetVelocityButton.addEventListener('click', () => applyScopePreset([
-    'velocity', 'controlObserverVelocity', 'rawVelocity',
+    'velocity', 'observerVelocity', 'encoderPllVelocity',
     'velocityProportionalTorque', 'velocityIntegratorTorque', 'lowSpeedTorque',
     'abzVelocityTorqueAfterLimit',
   ]));
@@ -1488,14 +1523,25 @@ function bindActions() {
     'iqSetpoint', 'current', 'idSetpoint', 'idMeasured', 'finalTorque', 'abzVelocityTorqueSaturated',
   ]));
   dom.scopePresetLowSpeedButton.addEventListener('click', () => applyScopePreset([
-    'velocity', 'controlObserverVelocity', 'rawVelocity',
+    'velocity', 'observerVelocity', 'encoderPllVelocity',
     'frictionState', 'frictionTargetTorque', 'lowSpeedTorque', 'frictionSpeedRatio',
     'velocityProportionalTorque', 'velocityIntegratorTorque', 'iqSetpoint', 'current',
   ]));
   dom.scopePresetCoggingButton.addEventListener('click', () => applyScopePreset([
-    'velocity', 'controlObserverVelocity', 'iqSetpoint', 'current',
+    'velocity', 'observerVelocity', 'iqSetpoint', 'current',
     'velocityProportionalTorque', 'velocityIntegratorTorque', 'lowSpeedTorque',
     'anticoggingCalibrationPhase', 'anticoggingProgressPercent',
+  ]));
+  // 速度估算诊断: setpoint + every mechanical estimator on one shared Y axis.
+  dom.scopePresetEstimationButton.addEventListener('click', () => applyScopePreset([
+    'velocitySetpoint', 'velocity', 'velocityWindow50ms', 'velocityWindow100ms',
+    'encoderPllVelocity', 'mtVelocity',
+  ]));
+  // 速度环诊断: velocity loop error/torque chain.
+  dom.scopePresetLoopButton.addEventListener('click', () => applyScopePreset([
+    'velocitySetpoint', 'velocity', 'velocityError', 'iqSetpoint',
+    'velocityProportionalTorque', 'velocityIntegratorTorque', 'lowSpeedTorque',
+    'finalTorque',
   ]));
   dom.scopeWindowSelect.addEventListener('change', () => {
     setScopeWindow(dom.scopeWindowSelect.value);

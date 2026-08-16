@@ -39,7 +39,9 @@ static Introspectable root_obj = ODriveTypeInfo<ODrive>::make_introspectable(odr
 // @brief Sends a line on the specified output.
 template<typename ... TArgs>
 void respond(StreamSink& output, bool include_checksum, const char * fmt, TArgs&& ... args) {
-    char response[384]; // Large enough for one FOC Studio diagnostic telemetry record.
+    // 512 bytes covers the worst-case FOC Studio diagnostic telemetry record
+    // (~500 chars: 56 specifiers, each float field <= ~12 chars).
+    char response[512];
     size_t len = snprintf(response, sizeof(response), fmt, std::forward<TArgs>(args)...);
     len = std::min(len, sizeof(response));
     output.process_bytes((uint8_t*)response, len, nullptr); // TODO: use process_all instead
@@ -64,10 +66,18 @@ enum FocFeedbackMode : uint8_t {
 
 static uint8_t foc_feedback_modes[AXIS_COUNT] = {0xff, 0xff};
 
+// Runtime velocity-mode tuning profile.  FOC Studio enters velocity control
+// with a VEL_RAMP input mode; the controller must keep the exact ABZ velocity
+// PI gains (abz_vel_gain / abz_vel_integrator_gain) and observer bandwidth
+// bounds that the UI shows, so this profile saves and restores those values
+// instead of touching the generic vel_gain/vel_integrator_gain (which are the
+// real gains only for SPI / sensorless velocity control).
 struct FocVelocityTuningState {
     bool active;
-    float vel_gain;
-    float vel_integrator_gain;
+    float abz_vel_gain;
+    float abz_vel_integrator_gain;
+    float abz_observer_min_bandwidth;
+    float abz_observer_max_bandwidth;
     float vel_ramp_rate;
     Controller::InputMode input_mode;
 };
@@ -111,11 +121,12 @@ static void restore_foc_velocity_tuning(Axis* axis) {
     if (!tuning.active)
         return;
     Controller::Config_t& controller = axis->controller_.config_;
-    controller.vel_gain = tuning.vel_gain;
-    controller.vel_integrator_gain = tuning.vel_integrator_gain;
+    controller.abz_vel_gain = tuning.abz_vel_gain;
+    controller.abz_vel_integrator_gain = tuning.abz_vel_integrator_gain;
+    controller.abz_velocity_observer_min_bandwidth = tuning.abz_observer_min_bandwidth;
+    controller.abz_velocity_observer_max_bandwidth = tuning.abz_observer_max_bandwidth;
     controller.vel_ramp_rate = tuning.vel_ramp_rate;
     controller.input_mode = tuning.input_mode;
-    axis->encoder_.reset_incremental_velocity_window();
     tuning.active = false;
 }
 
@@ -195,21 +206,24 @@ static void apply_foc_velocity_tuning(Axis* axis) {
     FocVelocityTuningState& tuning = foc_velocity_tuning[axis->axis_num_];
     Controller::Config_t& controller = axis->controller_.config_;
     if (!tuning.active) {
-        tuning.vel_gain = controller.vel_gain;
-        tuning.vel_integrator_gain = controller.vel_integrator_gain;
+        tuning.abz_vel_gain = controller.abz_vel_gain;
+        tuning.abz_vel_integrator_gain = controller.abz_vel_integrator_gain;
+        tuning.abz_observer_min_bandwidth =
+                controller.abz_velocity_observer_min_bandwidth;
+        tuning.abz_observer_max_bandwidth =
+                controller.abz_velocity_observer_max_bandwidth;
         tuning.vel_ramp_rate = controller.vel_ramp_rate;
         tuning.input_mode = controller.input_mode;
-        axis->encoder_.reset_incremental_velocity_window();
         tuning.active = true;
     }
-    // The ABZ low-speed plant needs more proportional torque to cross
-    // static friction. Controller-side scheduling tapers this back as the
-    // commanded speed approaches the proven 2 turn/s operating region.
-    controller.vel_gain = 0.0025f;
-    controller.vel_integrator_gain = 0.01f;
-    // Normal commands should reach the requested speed before the low-speed
-    // breakaway assist builds a large torque. The cogging scan overrides this
-    // with its deliberately slow 0.45 turn/s^2 ramp when it starts.
+    // The ABZ velocity PI always uses abz_vel_gain / abz_vel_integrator_gain
+    // (see Controller::update): the values the UI displays are the values the
+    // loop uses, so nothing is overridden here.  The generic
+    // vel_gain/vel_integrator_gain are left untouched (they are the real gains
+    // for SPI / sensorless velocity control).
+    //
+    // Only the input shaping is forced: a velocity ramp reaches the command
+    // smoothly and the observer bandwidth bounds stay whatever the UI shows.
     controller.vel_ramp_rate = 1.0f;
     controller.input_mode = Controller::INPUT_MODE_VEL_RAMP;
 }
@@ -235,13 +249,30 @@ static bool set_foc_control_mode(Axis* axis, Controller::ControlMode mode) {
     if (mode == Controller::CONTROL_MODE_VELOCITY_CONTROL) {
         apply_foc_velocity_tuning(axis);
         if (changed) {
-            // Start the velocity ramp at the measured speed. This avoids a
+            // Start the velocity ramp at the measured speed.  This avoids a
             // stale setpoint/integrator producing a torque impulse when a
-            // running axis changes from torque or position control.
+            // running axis changes from torque or position control.  For ABZ,
+            // the priority is: control observer -> 50 ms window -> M/T ->
+            // encoder PLL -> 0, so the setpoint matches the mechanical speed
+            // even while the rotor is spinning.
             const uint8_t feedback_mode = get_foc_feedback_mode(axis->axis_num_);
-            const float measured_velocity = foc_mode_is_sensorless(feedback_mode)
-                    ? axis->sensorless_estimator_.vel_estimate_
-                    : axis->encoder_.vel_estimate_;
+            float measured_velocity;
+            if (foc_mode_is_sensorless(feedback_mode)) {
+                measured_velocity = axis->sensorless_estimator_.vel_estimate_;
+            } else if (feedback_mode == FOC_MODE_SPI) {
+                measured_velocity = axis->encoder_.vel_estimate_;
+            } else {
+                measured_velocity = 0.0f;
+                if (axis->controller_.control_observer_valid_ &&
+                        std::isfinite(axis->controller_.control_observer_velocity_))
+                    measured_velocity = axis->controller_.control_observer_velocity_;
+                else if (axis->encoder_.velocity_window_50ms_valid_)
+                    measured_velocity = axis->encoder_.velocity_window_50ms_;
+                else if (axis->encoder_.mt_velocity_estimator_.valid())
+                    measured_velocity = axis->encoder_.mt_velocity_estimate_;
+                else if (std::isfinite(axis->encoder_.vel_estimate_))
+                    measured_velocity = axis->encoder_.vel_estimate_;
+            }
             axis->controller_.vel_setpoint_ = std::isfinite(measured_velocity)
                     ? measured_velocity : 0.0f;
             axis->controller_.torque_setpoint_ = 0.0f;
@@ -300,7 +331,7 @@ static bool set_foc_feedback_mode(Axis* axis, uint8_t mode) {
     axis->encoder_.is_ready_ = false;
     axis->encoder_.pos_estimate_valid_ = false;
     axis->encoder_.vel_estimate_valid_ = false;
-    axis->encoder_.reset_incremental_velocity_window();
+    axis->encoder_.reset_mechanical_velocity_estimators();
     axis->encoder_.spi_error_rate_ = 0.0f;
     axis->encoder_.error_ = Encoder::ERROR_NONE;
     if (encoder_mode == Encoder::MODE_SPI_ABS_AMS) {
@@ -393,8 +424,12 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float v_alpha = power_stage_active ? current_control.final_v_alpha : 0.0f;
             const float v_beta = power_stage_active ? current_control.final_v_beta : 0.0f;
             axis->watchdog_feed();
+            // Worst-case line length: 105 literal chars + 56 specifiers.  Each
+            // %.6g of a float-range double prints at most ~12 chars, %u/%lu at
+            // most 10, so the record never exceeds ~500 chars.  512 bytes of
+            // stack is the safe bound.
             respond(response_channel, use_checksum,
-                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %.6g %.6g %.6g",
+                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %.6g %.6g %.6g %.6g %.6g %.6g %lu",
                     (unsigned)axis->current_state_, (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
                     (double)v_alpha,
@@ -404,7 +439,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (double)(power_stage_active ? current_control.Iq_setpoint : 0.0f),
                     (double)(power_stage_active ? current_control.Id_setpoint : 0.0f),
                     (double)axis->controller_.vel_setpoint_, (double)raw_velocity,
-                    (double)axis->encoder_.incremental_window_velocity_,
+                    (double)axis->encoder_.velocity_window_50ms_,
                     (double)axis->controller_.vel_integrator_torque_,
                     (double)axis->controller_.low_speed_friction_torque_,
                     (double)axis->controller_.pos_setpoint_,
@@ -414,11 +449,11 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (double)axis->controller_.anticogging_torque_,
                     (double)axis->controller_.final_torque_,
                     (double)axis->motor_.max_available_torque(),
-                    (double)axis->encoder_.control_velocity_estimate_,
+                    (double)axis->encoder_.mt_velocity_estimate_,
                     (double)axis->controller_.velocity_error_,
                     (double)axis->controller_.torque_unsaturated_,
                     (unsigned)axis->controller_.motor_torque_saturated_,
-                    (double)axis->encoder_.incremental_velocity_estimator_.time_since_last_edge(),
+                    (double)axis->encoder_.mt_velocity_estimator_.time_since_last_edge(),
                     (double)axis->controller_.control_observer_velocity_,
                     (long)axis->encoder_.last_delta_count_,
                     (long)axis->encoder_.shadow_count_,
@@ -427,7 +462,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (unsigned)axis->controller_.abz_velocity_torque_saturated_,
                     (double)axis->controller_.config_.abz_vel_gain,
                     (double)axis->controller_.config_.abz_vel_integrator_gain,
-                    (double)axis->controller_.config_.control_velocity_observer_bandwidth,
+                    (double)axis->controller_.config_.abz_velocity_observer_min_bandwidth,
                     (double)axis->controller_.config_.abz_velocity_torque_limit,
                     (double)axis->controller_.config_.abz_coulomb_friction_torque,
                     (double)axis->controller_.config_.abz_breakaway_torque,
@@ -442,7 +477,11 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (unsigned)axis->controller_.anticogging_scan_phase_,
                     (double)axis->controller_.anticogging_progress_percent_,
                     (double)axis->controller_.anticogging_scan_velocity_,
-                    (double)axis->controller_.anticogging_scan_velocity_error_);
+                    (double)axis->controller_.anticogging_scan_velocity_error_,
+                    (double)axis->encoder_.velocity_window_100ms_,
+                    (double)axis->controller_.observer_bandwidth_,
+                    (double)axis->controller_.velocity_estimator_disagreement_,
+                    (unsigned long)axis->controller_.abz_count_glitch_count_);
         }
 
     } else if (cmd[0] == 'j') { // FOC Studio aggregate telemetry
@@ -478,7 +517,7 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float iq_setpoint = power_stage_active ? current_control.Iq_setpoint : 0.0f;
             const float id_setpoint = power_stage_active ? current_control.Id_setpoint : 0.0f;
             axis->watchdog_feed();
-            respond(response_channel, use_checksum, "@ %u %lu %.6g %.6g %.6g %.6g %.6g %u %.6g %u %lu %lu %lu %lu %u %u %u %ld %lu %lu %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %lu %u %.6g %.6g %.6g %.6g %.6g %lu %lu %lu %lu %lu %lu %.6g %u %u %u %u",
+            respond(response_channel, use_checksum, "@ %u %lu %.6g %.6g %.6g %.6g %.6g %u %.6g %u %lu %lu %lu %lu %u %u %u %ld %lu %lu %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %lu %u %.6g %.6g %.6g %.6g %.6g %lu %lu %lu %lu %lu %lu %.6g %u %u %u %u %lu",
                     (unsigned)axis->current_state_, (unsigned long)axis->error_,
                     (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
@@ -518,7 +557,8 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (unsigned)axis->controller_.anticogging_calibration_failed_,
                     (unsigned)axis->controller_.anticogging_calibration_abort_reason_,
                     (unsigned)axis->controller_.anticogging_stats_index_,
-                    (unsigned)axis->controller_.anticogging_finalize_index_);
+                    (unsigned)axis->controller_.anticogging_finalize_index_,
+                    (unsigned long)axis->controller_.anticogging_rejected_estimator_samples_);
         }
 
     } else if (cmd[0] == 'x') { // FOC Studio immediate stop

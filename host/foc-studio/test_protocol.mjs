@@ -30,7 +30,7 @@ assert.deepEqual(parseTelemetry('@ 8 0 12.5 -1.25 3.5 12.2 35 1 -0.004 4'), {
   anticoggingRejectedStateSamples: 0, anticoggingRejectedSaturationSamples: 0,
   anticoggingMapMaxAbs: 0, anticoggingCalibrationFailed: 0,
   anticoggingCalibrationAbortReason: 0, anticoggingStatsIndex: 0,
-  anticoggingPostprocessIndex: 0,
+  anticoggingPostprocessIndex: 0, anticoggingRejectedEstimatorSamples: 0,
 });
 const detailed = parseTelemetry('@ 1 320 0 0 3.5 12.2 35 0 0 0 8 128 32 0 0 0 1 -1 0 0');
 assert.equal(detailed.motorError, 8);
@@ -55,16 +55,21 @@ assert.deepEqual(parseFastTelemetry('! 8 1.25 -0.3 2.5 12.2 1 -0.2 -0.8 0.01 -0.
   axisState: AXIS_STATE[8], stateCode: 8, velocity: 1.25, current: -0.3,
   position: 2.5, busVoltage: 12.2, phaseAVoltage: 1, phaseBVoltage: -0.2,
   phaseCVoltage: -0.8, idMeasured: 0.01, iqSetpoint: -0.25, idSetpoint: 0,
+  controlVelocity: 1.25, encoderPllVelocity: 1.25, velocityWindow50ms: 1.25,
+  velocityWindow100ms: 0, mtVelocity: 1.25, observerVelocity: 1.25,
+  observerBandwidth: 0, velocityEstimatorDisagreement: 0, abzCountGlitchCount: 0,
   velocitySetpoint: 0, rawVelocity: 1.25, windowVelocity: 1.25,
+  mTVelocity: 1.25, controlObserverVelocity: 1.25,
   velocityIntegratorTorque: 0, lowSpeedTorque: 0, frictionTorque: 0,
   positionSetpoint: 2.5, positionError: 0, lowSpeedState: 0, frictionState: 0,
   velocityProportionalTorque: 0, anticoggingTorque: 0, finalTorque: 0,
-  maxAvailableTorque: 0, mTVelocity: 1.25, velocityError: 0,
+  maxAvailableTorque: 0, velocityError: 0,
   torqueUnsaturated: 0, motorTorqueSaturated: 0, encoderEdgeAge: 0,
-  controlObserverVelocity: 1.25, encoderDeltaCount: 0, encoderShadowCount: 0,
+  encoderDeltaCount: 0, encoderShadowCount: 0,
   abzVelocityTorqueBeforeLimit: 0, abzVelocityTorqueAfterLimit: 0,
   abzVelocityTorqueSaturated: 0, abzVelGain: 0, abzVelIntegratorGain: 0,
-  controlVelocityObserverBandwidth: 0, abzVelocityTorqueLimit: 0,
+  abzObserverMinBandwidth: 0, controlVelocityObserverBandwidth: 0,
+  abzVelocityTorqueLimit: 0,
   abzCoulombFrictionTorque: 0, abzBreakawayTorque: 0, enableLowSpeedCompensation: 0,
   frictionTargetTorque: 0, frictionSpeedRatio: 0, frictionAssistBlend: 0,
   frictionNoProgressTime: 0, frictionRecoveryTimer: 0,
@@ -85,6 +90,39 @@ assert.equal(controlTelemetry.velocityProportionalTorque, 0.0004);
 assert.equal(controlTelemetry.anticoggingTorque, -0.0008);
 assert.equal(controlTelemetry.finalTorque, 0.0041);
 assert.equal(controlTelemetry.maxAvailableTorque, 0.0254);
+// Full 56-field fast-telemetry record: the appended estimator diagnostics must
+// land on their exact positions (firmware formatter and JS parser aligned).
+const fullFastFields = new Array(56).fill(0);
+fullFastFields[0] = 8;        // axis state
+fullFastFields[1] = 0.2;      // velocity / controlVelocity
+fullFastFields[12] = 0.35;    // rawVelocity / encoderPllVelocity
+fullFastFields[13] = 0.175;   // windowVelocity / velocityWindow50ms
+fullFastFields[23] = 0.05;    // mTVelocity / mtVelocity
+fullFastFields[28] = 2;       // controlObserverVelocity / observerVelocity
+fullFastFields[36] = 15;      // abzObserverMinBandwidth
+fullFastFields[52] = 0.18;    // velocityWindow100ms
+fullFastFields[53] = 24.5;    // observerBandwidth (effective)
+fullFastFields[54] = -0.02;   // velocityEstimatorDisagreement
+fullFastFields[55] = 7;       // abzCountGlitchCount
+assert.equal(fullFastFields.length, 56, 'firmware fast telemetry carries 56 fields');
+const parsedFull = parseFastTelemetry(`! ${fullFastFields.join(' ')}`);
+assert.equal(parsedFull.velocityWindow100ms, 0.18);
+assert.equal(parsedFull.observerBandwidth, 24.5);
+assert.equal(parsedFull.velocityEstimatorDisagreement, -0.02);
+assert.equal(parsedFull.abzCountGlitchCount, 7);
+assert.equal(parsedFull.abzObserverMinBandwidth, 15);
+assert.equal(parsedFull.controlVelocity, 0.2);
+assert.equal(parsedFull.encoderPllVelocity, 0.35);
+assert.equal(parsedFull.velocityWindow50ms, 0.175);
+assert.equal(parsedFull.mtVelocity, 0.05);
+assert.equal(parsedFull.observerVelocity, 2);
+// A line with more fields than the parser knows must still parse (the parser
+// maps by position and ignores trailing unknown fields gracefully).
+const longerLine = parseFastTelemetry(`! ${[...fullFastFields, 99, 98].join(' ')}`);
+assert.equal(longerLine.velocityWindow100ms, 0.18);
+// The appended estimator-agreement counter on the aggregate 'j' record.
+const aggregate = parseTelemetry('@ 8 0 0.2 0.7 0.1 12.1 30 0 0 1 0 0 0 0 3 1 1 1 0 0 2 0 0 0 0 0.2 0 1 1 1800 3120 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1');
+assert.equal(aggregate.anticoggingRejectedEstimatorSamples, 1);
 assert.equal(parseFastTelemetry('@ 8 0 1 2 3 4 5 6 7 8 9'), null);
 assert.ok(decodeFaults(detailed).some(({ title }) => title.includes('DRV8301')));
 assert.ok(faultSummary(detailed).includes('编码器'));
