@@ -292,7 +292,10 @@ export function parseFastTelemetry(line) {
     abzVelGain,
     abzVelIntegratorGain,
     abzObserverMinBandwidth,
-    controlVelocityObserverBandwidth: abzObserverMinBandwidth,
+    // Legacy alias: controlVelocityObserverBandwidth must track the EFFECTIVE
+    // dynamic observer bandwidth (observerBandwidth), not the configured lower
+    // bound (abzObserverMinBandwidth).
+    controlVelocityObserverBandwidth: observerBandwidth,
     abzVelocityTorqueLimit,
     abzCoulombFrictionTorque,
     abzBreakawayTorque,

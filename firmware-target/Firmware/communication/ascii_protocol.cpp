@@ -37,21 +37,32 @@ static Introspectable root_obj = ODriveTypeInfo<ODrive>::make_introspectable(odr
 /* Function implementations --------------------------------------------------*/
 
 // @brief Sends a line on the specified output.
+// Buffer sizing is verified by the host protocol test
+// (host/foc-studio/test_protocol.mjs, fastTelemetryWorstCaseLength), which
+// extracts the firmware's own format string and computes the absolute worst
+// case per specifier: the 56-field `g` record is 57 literal chars +
+// 46 * 13 (%.6g of a double, e.g. "-1.23457e+308") + 7 * 10 (%u) +
+// 2 * 11 (%ld) + 1 * 10 (%lu) = 757 chars, so 1024 bytes is the verified safe
+// size with margin.  As defense in depth, if snprintf ever returns a negative
+// value (encoding error) or a value that does not fit the buffer, the frame is
+// DROPPED instead of emitting a truncated record: a partial telemetry line
+// would corrupt the host parser state.
 template<typename ... TArgs>
 void respond(StreamSink& output, bool include_checksum, const char * fmt, TArgs&& ... args) {
-    // 512 bytes covers the worst-case FOC Studio diagnostic telemetry record
-    // (~500 chars: 56 specifiers, each float field <= ~12 chars).
-    char response[512];
-    size_t len = snprintf(response, sizeof(response), fmt, std::forward<TArgs>(args)...);
-    len = std::min(len, sizeof(response));
+    char response[1024];
+    const int required = snprintf(response, sizeof(response), fmt, std::forward<TArgs>(args)...);
+    if (required < 0 || (size_t)required >= sizeof(response))
+        return;  // never send a truncated or failed record
+    size_t len = (size_t)required;
     output.process_bytes((uint8_t*)response, len, nullptr); // TODO: use process_all instead
     if (include_checksum) {
         uint8_t checksum = 0;
         for (size_t i = 0; i < len; ++i)
             checksum ^= response[i];
-        len = snprintf(response, sizeof(response), "*%u", checksum);
-        len = std::min(len, sizeof(response));
-        output.process_bytes((uint8_t*)response, len, nullptr);
+        const int cs_len = snprintf(response, sizeof(response), "*%u", checksum);
+        if (cs_len < 0 || (size_t)cs_len >= sizeof(response))
+            return;
+        output.process_bytes((uint8_t*)response, (size_t)cs_len, nullptr);
     }
     output.process_bytes((const uint8_t*)"\r\n", 2, nullptr);
 }
@@ -253,8 +264,10 @@ static bool set_foc_control_mode(Axis* axis, Controller::ControlMode mode) {
             // stale setpoint/integrator producing a torque impulse when a
             // running axis changes from torque or position control.  For ABZ,
             // the priority is: control observer -> 50 ms window -> M/T ->
-            // encoder PLL -> 0, so the setpoint matches the mechanical speed
-            // even while the rotor is spinning.
+            // encoder PLL -> 0 (the tail matches Controller::update()'s
+            // observer seed via the shared abz_observer_seed_velocity helper),
+            // so the setpoint matches the mechanical speed even while the
+            // rotor is spinning.
             const uint8_t feedback_mode = get_foc_feedback_mode(axis->axis_num_);
             float measured_velocity;
             if (foc_mode_is_sensorless(feedback_mode)) {
@@ -264,14 +277,17 @@ static bool set_foc_control_mode(Axis* axis, Controller::ControlMode mode) {
             } else {
                 measured_velocity = 0.0f;
                 if (axis->controller_.control_observer_valid_ &&
-                        std::isfinite(axis->controller_.control_observer_velocity_))
+                        std::isfinite(axis->controller_.control_observer_velocity_)) {
                     measured_velocity = axis->controller_.control_observer_velocity_;
-                else if (axis->encoder_.velocity_window_50ms_valid_)
-                    measured_velocity = axis->encoder_.velocity_window_50ms_;
-                else if (axis->encoder_.mt_velocity_estimator_.valid())
-                    measured_velocity = axis->encoder_.mt_velocity_estimate_;
-                else if (std::isfinite(axis->encoder_.vel_estimate_))
-                    measured_velocity = axis->encoder_.vel_estimate_;
+                } else {
+                    measured_velocity = abz_observer_seed_velocity(
+                            axis->encoder_.velocity_window_50ms_valid_,
+                            axis->encoder_.velocity_window_50ms_,
+                            axis->encoder_.mt_velocity_estimator_.valid(),
+                            axis->encoder_.mt_velocity_estimate_,
+                            axis->encoder_.vel_estimate_valid_,
+                            axis->encoder_.vel_estimate_);
+                }
             }
             axis->controller_.vel_setpoint_ = std::isfinite(measured_velocity)
                     ? measured_velocity : 0.0f;

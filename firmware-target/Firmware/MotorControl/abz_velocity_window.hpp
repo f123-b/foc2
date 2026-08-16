@@ -48,7 +48,10 @@ public:
     // deltas that leave each window.  The 100 ms window drops the slot about
     // to be overwritten; the 50 ms window drops the slot written exactly
     // Samples50 ticks ago, which sits `Samples100 - Samples50` slots behind
-    // the current write position.
+    // the current write position.  The 8 kHz hot path avoids integer modulo on
+    // the fixed-size ring: indices advance by increment + conditional wrap
+    // (head_ and the drop offset are both < Samples100, so a single
+    // subtraction wraps correctly).
     void push(int32_t delta) {
         if (count100_ < Samples100)
             ++count100_;
@@ -56,14 +59,20 @@ public:
             sum100_ -= ring_[head_];
         sum100_ += delta;
 
-        if (count50_ < Samples50)
+        if (count50_ < Samples50) {
             ++count50_;
-        else
-            sum50_ -= ring_[(head_ + Samples100 - Samples50) % Samples100];
+        } else {
+            uint16_t drop50 = static_cast<uint16_t>(head_ + kDrop50Offset);
+            if (drop50 >= Samples100)
+                drop50 = static_cast<uint16_t>(drop50 - Samples100);
+            sum50_ -= ring_[drop50];
+        }
         sum50_ += delta;
 
         ring_[head_] = delta;
-        head_ = static_cast<uint16_t>((head_ + 1) % Samples100);
+        ++head_;
+        if (head_ >= Samples100)
+            head_ = 0;
     }
 
     bool valid50() const { return count50_ == Samples50; }
@@ -94,6 +103,9 @@ public:
     }
 
 private:
+    // Distance from the current write slot to the slot written exactly
+    // Samples50 ticks ago (used for the 50 ms window drop).
+    static constexpr uint16_t kDrop50Offset = Samples100 - Samples50;
     int32_t ring_[Samples100] = {};
     uint16_t head_ = 0;
     uint16_t count100_ = 0;

@@ -7,6 +7,7 @@
 
 #include "friction_compensator.hpp"
 #include "abz_velocity_observer.hpp"
+#include "abz_velocity_utils.hpp"
 
 class Controller : public ODriveIntf::ControllerIntf {
 public:
@@ -175,9 +176,11 @@ public:
     float velocity_control_feedback_ = 0.0f;
     bool velocity_control_feedback_valid_ = false;
     // Overspeed is safety-critical, but a single ABZ edge/PLL impulse must
-    // not abort a running scan or speed command. Require a short consecutive
-    // violation window before latching the controller fault.
-    uint16_t overspeed_violation_count_ = 0;
+    // not abort a running scan or speed command.  Dual-layer qualified
+    // detection: normal layer on the control observer, emergency layer on the
+    // raw PLL / 50 ms count window (2x the normal limit); both require
+    // consecutive cycles before latching (see AbzOverspeedQualifier).
+    AbzOverspeedQualifier overspeed_qualifier_;
     // P + I torque actually used by the velocity loop in the previous control
     // cycle. The bidirectional cogging scan samples this rather than I alone.
     float velocity_loop_torque_ = 0.0f;

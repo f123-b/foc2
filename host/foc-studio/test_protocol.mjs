@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   AXIS_STATE, CONTROL_MODE, LineParser, MODE, command, decodeFaults, encodeCommand,
   faultSummary, parseFastTelemetry, parseTelemetry,
@@ -116,6 +118,29 @@ assert.equal(parsedFull.encoderPllVelocity, 0.35);
 assert.equal(parsedFull.velocityWindow50ms, 0.175);
 assert.equal(parsedFull.mtVelocity, 0.05);
 assert.equal(parsedFull.observerVelocity, 2);
+// The legacy controlVelocityObserverBandwidth alias must track the EFFECTIVE
+// dynamic bandwidth (observerBandwidth), never the fixed min-bandwidth config.
+assert.equal(parsedFull.controlVelocityObserverBandwidth, 24.5);
+assert.notEqual(parsedFull.controlVelocityObserverBandwidth, parsedFull.abzObserverMinBandwidth);
+// Worst-case fast-telemetry line length, computed from the firmware's own
+// format string in ascii_protocol.cpp (this must stay under the firmware
+// respond() buffer so a record is never truncated; the firmware additionally
+// drops a frame if snprintf ever reports it would not fit).
+const firmwarePath = fileURLToPath(new URL('../../firmware-target/Firmware/communication/ascii_protocol.cpp', import.meta.url));
+const asciiSource = readFileSync(firmwarePath, 'utf8');
+const formatMatch = asciiSource.match(/"(![^"]*)"/);
+assert.ok(formatMatch, 'fast telemetry format string found in ascii_protocol.cpp');
+const format = formatMatch[1];
+const specifiers = [...format.matchAll(/%(?:u|ld|lu|\.6g)/g)].map((m) => m[0]);
+const literalLength = format.replace(/%(?:u|ld|lu|\.6g)/g, '').length;
+const worstValueWidth = { '%u': 10, '%ld': 11, '%lu': 10, '%.6g': 13 }; // chars
+const worstCaseLength = literalLength + specifiers.reduce((sum, s) => sum + worstValueWidth[s], 0);
+assert.equal(specifiers.length, 56, 'firmware fast telemetry format has 56 specifiers');
+assert.equal(literalLength, 57, 'g-format literal length (separators + "! ")');
+assert.equal(worstCaseLength, 57 + 46 * 13 + 7 * 10 + 2 * 11 + 1 * 10,
+  'worst-case formula matches the specifier mix (46x%.6g, 7x%u, 2x%ld, 1x%lu)');
+assert.ok(worstCaseLength < 1024,
+  `fast telemetry worst case ${worstCaseLength} chars must fit the 1024-byte respond() buffer`);
 // A line with more fields than the parser knows must still parse (the parser
 // maps by position and ignores trailing unknown fields gracefully).
 const longerLine = parseFastTelemetry(`! ${[...fullFastFields, 99, 98].join(' ')}`);

@@ -6,6 +6,7 @@
 //   abz_velocity_window.hpp        50/100 ms true sliding windows
 //   incremental_velocity_estimator.hpp  M/T count-time diagnostic
 //   abz_velocity_observer.hpp      ABZ mechanical velocity observer
+//   abz_velocity_utils.hpp         seed / glitch-threshold / overspeed helpers
 //
 // Coverage (docs/ABZ_VELOCITY_ESTIMATION.md):
 //   1.  +1 turn/s  -> window50 ~ 1, window100 ~ 1
@@ -18,6 +19,11 @@
 //   8.  observer reset while rotor moving: no velocity-from-zero impulse
 //   9.  (protocol field count is covered by host/foc-studio/test_protocol.mjs)
 //  10.  long-duration count handling: no overflow / float precision regression
+//  11.  observer seed fallback: window/M-T invalid, PLL valid -> seed ~ PLL
+//  12.  glitch threshold: legitimate 2 turn/s stream at command 0 is NOT
+//      flagged; a single impossible count spike IS flagged
+//  13.  overspeed qualifier: a single raw PLL spike does not fault; a
+//      sustained runaway does
 //  26.  speed sweep 0.1/0.2/0.5/1.0/2.0 with edge timing jitter +/-10% / +/-20%
 //      -> window100 is the steadiest, window50 second, observer tracks for
 //         closed-loop use.
@@ -32,6 +38,7 @@
 #include "abz_velocity_window.hpp"
 #include "incremental_velocity_estimator.hpp"
 #include "abz_velocity_observer.hpp"
+#include "abz_velocity_utils.hpp"
 
 namespace {
 
@@ -241,18 +248,129 @@ void test_single_glitch() {
     CHECK(max_after < 0.5f);
     CHECK_NEAR(h.mt.velocity(), 0.2, 0.05);
 
-    // Glitch threshold derivation mirroring Controller::update():
-    //   expected = max(|vel_des|, 1) * CPR * dt * 3, threshold = max(2, ceil)
-    auto threshold = [](double vel_des) -> int32_t {
-        const double expected = std::max(std::fabs(vel_des), 1.0) * kCprD * kDt * 3.0;
-        return std::max((int32_t)2, (int32_t)(expected + 0.999));
+    // --- test 7b: glitch threshold (shared helper used by Controller) -------
+    // threshold = max(2, ceil(3 * plausible_speed * CPR * period))
+    auto threshold_for = [](float plausible_speed) {
+        return abz_count_glitch_threshold(plausible_speed, (int32_t)kCprD, (float)kDt);
     };
-    CHECK(threshold(0.2) == 2);      // 1.5 -> 2
-    CHECK(threshold(1.0) == 2);      // 1.5 -> 2
-    CHECK(threshold(2.0) == 3);      // 3.0 -> 3
-    CHECK(threshold(10.0) == 15);    // 15 -> 15
-    CHECK(std::abs(5) > threshold(0.2));   // the stray +5 would be flagged
-    CHECK(std::abs(1) <= threshold(2.0));  // normal counts are not flagged
+    CHECK(threshold_for(0.0f) == 2);    // standstill floor: a 2-count tick is the limit
+    CHECK(threshold_for(0.2f) == 2);    // 0.075 -> ceil -> 1 -> floor 2
+    CHECK(threshold_for(1.0f) == 2);    // 1.5 -> 2
+    CHECK(threshold_for(2.0f) == 3);    // 3.0 -> 3
+    CHECK(threshold_for(10.0f) == 15);  // 15.0 -> 15
+    // The +5 stray above is far above the ~2 threshold at a 0.2 turn/s envelope.
+    CHECK(std::abs(5) > threshold_for(0.2f));
+
+    // --- test 7c: legitimate fast counts at command = 0 are NOT glitches -----
+    // Command is 0 but the rotor is dragged at 2 turn/s: observer and window50
+    // converge to ~2, so the plausible envelope is ~2 and the stream (<= 2
+    // counts/tick) never exceeds the threshold.  No glitch counter increment.
+    {
+        Harness h;
+        Rotor rotor;
+        uint32_t glitches = 0;
+        for (int i = 0; i < 16000; ++i) {
+            const int32_t delta = rotor.tick(2.0);   // legitimate 2 turn/s stream
+            h.feed(delta, 0.0f);                     // command = 0
+            const float plausible = std::max(
+                    std::max(0.0f, std::fabs(h.observer.velocity())),
+                    h.window.valid50() ? std::fabs(h.window.velocity50((float)kCpr, (float)kDt)) : 0.0f);
+            if (std::abs(delta) > threshold_for(plausible))
+                ++glitches;
+        }
+        CHECK(glitches == 0);
+    }
+
+    // --- test 7d: an impossible single count spike IS flagged ----------------
+    // All estimators agree the rotor is at ~0.2 turn/s; a +50 count in one
+    // tick (160 turn/s instantaneous) is far beyond the envelope.
+    {
+        Harness h;
+        Rotor rotor;
+        for (int i = 0; i < 4000; ++i)
+            h.feed(rotor.tick(0.2), 0.2f);
+        uint32_t glitches = 0;
+        for (int i = 0; i < 64; ++i) {
+            const int32_t delta = (i == 32) ? 50 : rotor.tick(0.2);
+            h.feed(delta, 0.2f);
+            const float plausible = std::max(
+                    std::max(0.2f, std::fabs(h.observer.velocity())),
+                    h.window.valid50() ? std::fabs(h.window.velocity50((float)kCpr, (float)kDt)) : 0.0f);
+            if (std::abs(delta) > threshold_for(plausible))
+                ++glitches;
+        }
+        CHECK(glitches == 1);
+    }
+}
+
+// --- test 11: observer seed fallback (shared helper used by Controller) ------
+void test_observer_seed_fallback() {
+    // window invalid, M/T invalid, raw PLL valid = 1 turn/s -> seed = PLL.
+    CHECK_NEAR(abz_observer_seed_velocity(
+            false, 0.0f, false, 0.0f, true, 1.0f), 1.0, 1e-6);
+    // window valid wins over M/T and PLL.
+    CHECK_NEAR(abz_observer_seed_velocity(
+            true, 0.4f, true, 1.2f, true, 1.0f), 0.4, 1e-6);
+    // M/T wins over PLL when window is invalid.
+    CHECK_NEAR(abz_observer_seed_velocity(
+            false, 0.0f, true, -0.7f, true, 1.0f), -0.7, 1e-6);
+    // PLL wins when window and M/T are invalid.
+    CHECK_NEAR(abz_observer_seed_velocity(
+            false, 0.0f, false, 0.0f, true, -1.0f), -1.0, 1e-6);
+    // Non-finite PLL falls through to 0.
+    CHECK(abz_observer_seed_velocity(
+            false, 0.0f, false, 0.0f, true, NAN) == 0.0f);
+    CHECK(abz_observer_seed_velocity(
+            false, 0.0f, false, 0.0f, true, INFINITY) == 0.0f);
+    // Everything invalid -> 0.
+    CHECK(abz_observer_seed_velocity(
+            false, 0.0f, false, 0.0f, false, 0.0f) == 0.0f);
+}
+
+// --- test 13: dual-layer overspeed qualifier ---------------------------------
+void test_overspeed_qualifier() {
+    AbzOverspeedQualifier q;
+
+    // A single raw PLL spike (emergency layer only, one cycle) never faults.
+    q.reset();
+    bool faulted = false;
+    for (int i = 0; i < 200; ++i) {
+        const bool spike = (i == 50);
+        if (q.update(false, spike))
+            faulted = true;
+    }
+    CHECK(!faulted);
+
+    // Normal-layer qualification: observer over normal limit for many cycles.
+    q.reset();
+    faulted = false;
+    for (int i = 0; i < 15; ++i)
+        faulted = q.update(true, false) || faulted;
+    CHECK(!faulted);  // 15 < 16
+    CHECK(q.update(true, false));  // 16th cycle latches
+
+    // Sustained emergency runaway (raw PLL beyond emergency limit) latches.
+    q.reset();
+    faulted = false;
+    for (int i = 0; i < 100; ++i) {
+        if (q.update(false, true))
+            faulted = true;
+    }
+    CHECK(faulted);
+
+    // Intermittent raw spikes reset the counter and never latch.
+    q.reset();
+    faulted = false;
+    for (int i = 0; i < 1000; ++i) {
+        const bool spike = (i % 40 == 0);  // one spike every 40 cycles
+        if (q.update(false, spike))
+            faulted = true;
+    }
+    CHECK(!faulted);
+
+    // Emergency limit is 2x the normal limit.
+    CHECK_NEAR(AbzOverspeedQualifier::emergency_limit(3.6f), 7.2, 1e-6);
+    CHECK_NEAR(AbzOverspeedQualifier::emergency_limit(24.0f), 48.0, 1e-6);
 }
 
 // --- test 8: observer reset while rotor moving ------------------------------
@@ -334,6 +452,8 @@ int main() {
     test_single_glitch();
     test_observer_reset_while_moving();
     test_long_duration();
+    test_observer_seed_fallback();
+    test_overspeed_qualifier();
     test_jitter_sweep();
 
     std::printf("velocity estimator tests: %d checks, %d failures\n",

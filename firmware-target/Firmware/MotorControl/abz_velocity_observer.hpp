@@ -63,14 +63,21 @@ public:
     }
 
     // Set the runtime bandwidth bounds.  Only the bounds are stored here; the
-    // effective bandwidth is applied per tick through set_bandwidth_for().
+    // effective bandwidth is applied per tick through set_bandwidth().  This
+    // is called on the 8 kHz control hot path, so it is a cached no-op unless
+    // a bound actually changed: the normal tick only does bandwidth_for() +
+    // set_bandwidth() + update().
     void configure(float min_bandwidth_hz, float max_bandwidth_hz) {
-        min_bw_ = std::isfinite(min_bandwidth_hz)
+        const float min_bw = std::isfinite(min_bandwidth_hz)
                 ? std::clamp(min_bandwidth_hz, kMinBandwidthHz, kMaxBandwidthHz)
                 : kScheduleBw[0];
-        max_bw_ = std::isfinite(max_bandwidth_hz)
-                ? std::clamp(max_bandwidth_hz, min_bw_, kMaxBandwidthHz)
-                : std::max(min_bw_, kScheduleBw[4]);
+        const float max_bw = std::isfinite(max_bandwidth_hz)
+                ? std::clamp(max_bandwidth_hz, min_bw, kMaxBandwidthHz)
+                : std::max(min_bw, kScheduleBw[4]);
+        if (min_bw == min_bw_ && max_bw == max_bw_)
+            return;  // cached: bounds unchanged, nothing to recompute
+        min_bw_ = min_bw;
+        max_bw_ = max_bw;
     }
 
     // Map |commanded velocity| (turn/s) to a bandwidth (Hz) using the smooth

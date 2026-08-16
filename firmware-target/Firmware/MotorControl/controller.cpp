@@ -97,7 +97,7 @@ void Controller::reset(bool abort_anticogging) {
     torque_setpoint_ = 0.0f;
     velocity_control_feedback_ = 0.0f;
     velocity_control_feedback_valid_ = false;
-    overspeed_violation_count_ = 0;
+    overspeed_qualifier_.reset();
     velocity_loop_torque_ = 0.0f;
     velocity_proportional_torque_ = 0.0f;
     anticogging_torque_ = 0.0f;
@@ -916,39 +916,52 @@ bool Controller::update(float* torque_setpoint_output) {
         vel_des = std::clamp(vel_des, -vel_lim, vel_lim);
     }
 
-    // Check for overspeed fault (done in this module (controller) for cohesion with vel_lim).
-    // Use the conditioned control feedback for ABZ and qualify the violation;
-    // raw encoder PLL impulses are not a reliable reason to drop PWM.
+    // Check for overspeed fault (done in this module (controller) for cohesion
+    // with vel_lim).  Dual-layer qualified detection (see AbzOverspeedQualifier
+    // and docs/ABZ_VELOCITY_ESTIMATION.md):
+    //   A. normal: the ABZ control feedback (observer) exceeds the normal
+    //      limit (vel_limit * vel_limit_tolerance);
+    //   B. emergency: the raw encoder PLL or the 50 ms count window exceeds a
+    //      higher emergency limit (2x the normal limit), so a real runaway is
+    //      not entirely dependent on the low-bandwidth observer.
+    // Both layers share one consecutive-cycle counter: a single raw PLL spike
+    // never drops PWM, a sustained violation latches ERROR_OVERSPEED.
     if (config_.enable_overspeed_error) {  // 0.0f to disable
         if (!vel_estimate_src) {
             set_error(ERROR_INVALID_ESTIMATE);
             return false;
         }
-        float overspeed_velocity = *vel_estimate_src;
-        const bool abz_velocity_control = cascaded_abz_control();
-        if (abz_velocity_control) {
-            // The rolling count window is useful for the velocity loop, but it
-            // is not a safety signal during a scan: one position-synchronous
-            // burst can report 4+ turn/s while the filtered plant speed is
-            // still near the 2 turn/s target. Use the same conditioned value
-            // that drives P/I for the qualified overspeed check.
-            if (velocity_control_feedback_valid_) {
-                overspeed_velocity = velocity_control_feedback_;
-            } else {
-                overspeed_velocity = velocity_feedback_for_control(*vel_estimate_src, vel_des);
-            }
-        }
-        const float overspeed_limit = std::abs(config_.vel_limit_tolerance * vel_lim);
-        if (std::isfinite(overspeed_limit) && overspeed_limit > 0.0f &&
-                std::abs(overspeed_velocity) > overspeed_limit) {
-            // 16 control cycles is short enough to catch a real runaway while
-            // rejecting the one-to-three-cycle impulses visible in ABZ plots.
-            if (++overspeed_violation_count_ >= 16) {
-                set_error(ERROR_OVERSPEED);
-                return false;
+        const float normal_limit = std::abs(config_.vel_limit_tolerance * vel_lim);
+        bool normal_exceeded = false;
+        bool emergency_exceeded = false;
+        if (cascaded_abz_control()) {
+            // Layer A uses the same conditioned value that drives P/I.
+            const float control_feedback = velocity_control_feedback_valid_
+                    ? velocity_control_feedback_
+                    : velocity_feedback_for_control(*vel_estimate_src, vel_des);
+            if (std::isfinite(normal_limit) && normal_limit > 0.0f &&
+                    std::abs(control_feedback) > normal_limit)
+                normal_exceeded = true;
+            // Layer B: raw PLL and count-window sanity at the higher
+            // emergency threshold.
+            const float emergency_limit =
+                    AbzOverspeedQualifier::emergency_limit(normal_limit);
+            if (std::isfinite(emergency_limit) && emergency_limit > 0.0f) {
+                if (std::abs(*vel_estimate_src) > emergency_limit)
+                    emergency_exceeded = true;
+                if (axis_->encoder_.velocity_window_50ms_valid_ &&
+                        std::abs(axis_->encoder_.velocity_window_50ms_) >
+                                emergency_limit)
+                    emergency_exceeded = true;
             }
         } else {
-            overspeed_violation_count_ = 0;
+            if (std::isfinite(normal_limit) && normal_limit > 0.0f &&
+                    std::abs(*vel_estimate_src) > normal_limit)
+                normal_exceeded = true;
+        }
+        if (overspeed_qualifier_.update(normal_exceeded, emergency_exceeded)) {
+            set_error(ERROR_OVERSPEED);
+            return false;
         }
     }
 
@@ -976,6 +989,9 @@ bool Controller::update(float* torque_setpoint_output) {
     // commutation / phase interpolation / safety.
     if (cascaded_abz_mode) {
         const int32_t cpr = std::max<int32_t>(1, axis_->encoder_.config_.cpr);
+        // configure() is a cached no-op unless the min/max bandwidth bounds
+        // actually changed, so the 8 kHz hot path only does bandwidth_for() +
+        // set_bandwidth() + update().
         abz_velocity_observer_.configure(
                 config_.abz_velocity_observer_min_bandwidth,
                 config_.abz_velocity_observer_max_bandwidth);
@@ -986,11 +1002,18 @@ bool Controller::update(float* torque_setpoint_output) {
             // Initialize while the rotor may be moving: seed the velocity from
             // the best available estimator so switching into velocity mode
             // does not start the loop from zero and produce a torque impulse.
-            float initial_velocity = 0.0f;
-            if (axis_->encoder_.velocity_window_50ms_valid_)
-                initial_velocity = axis_->encoder_.velocity_window_50ms_;
-            else if (axis_->encoder_.mt_velocity_estimator_.valid())
-                initial_velocity = axis_->encoder_.mt_velocity_estimate_;
+            // The priority matches set_foc_control_mode()'s setpoint seeding:
+            // 50 ms window -> M/T -> encoder PLL -> 0 (shared helper), so the
+            // observer seed and the velocity setpoint never disagree.
+            const bool pll_valid =
+                    vel_estimate_valid_src_ && *vel_estimate_valid_src_;
+            const float initial_velocity = abz_observer_seed_velocity(
+                    axis_->encoder_.velocity_window_50ms_valid_,
+                    axis_->encoder_.velocity_window_50ms_,
+                    axis_->encoder_.mt_velocity_estimator_.valid(),
+                    axis_->encoder_.mt_velocity_estimate_,
+                    pll_valid && vel_estimate_src_,
+                    vel_estimate_src_ ? *vel_estimate_src_ : 0.0f);
             abz_velocity_observer_.reset(
                     (float)axis_->encoder_.shadow_count_ / (float)cpr,
                     initial_velocity);
@@ -1011,12 +1034,20 @@ bool Controller::update(float* torque_setpoint_output) {
 
         // Abnormal count detection (diagnostic only, never faults): a single
         // control tick whose |delta| exceeds 3x the physically expected counts
-        // at the commanded speed is a likely ABZ signal-integrity glitch.
-        const float expected_counts_per_tick =
-                std::max(std::fabs(vel_des), 1.0f) *
-                (float)cpr * current_meas_period;
-        const int32_t glitch_threshold = std::max(
-                (int32_t)2, (int32_t)(expected_counts_per_tick * 3.0f + 0.999f));
+        // per tick given the current speed envelope (max of commanded speed,
+        // control observer and 50 ms window).  Legitimate fast motion
+        // (external drag, overshoot, deceleration, command = 0 while the rotor
+        // still spins) raises the envelope through the observer / window and
+        // is not flagged; an impossible single-count spike is.  The raw PLL is
+        // excluded on purpose: it is the signal that spikes on a glitch.
+        const float plausible_speed = std::max(
+                std::max(std::fabs(vel_des),
+                         std::fabs(control_observer_velocity_)),
+                axis_->encoder_.velocity_window_50ms_valid_
+                        ? std::fabs(axis_->encoder_.velocity_window_50ms_)
+                        : 0.0f);
+        const int32_t glitch_threshold = abz_count_glitch_threshold(
+                plausible_speed, cpr, current_meas_period);
         if (std::abs(axis_->encoder_.last_delta_count_) > glitch_threshold)
             ++abz_count_glitch_count_;
     } else {

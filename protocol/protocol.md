@@ -27,21 +27,33 @@
 
 ## 遥测格式
 
-快帧用于示波器和控制量，格式为：
+快帧用于示波器和控制量，格式为（共 56 个字段，按位置解析，无字段名；新字段
+追加在末尾，旧字段位置稳定）：
 
 ```text
-! state velocity current position bus_voltage phase_a_voltage phase_b_voltage phase_c_voltage id_measured iq_setpoint id_setpoint velocity_setpoint raw_velocity window_velocity velocity_integrator_torque low_speed_torque position_setpoint position_error low_speed_state
+! state velocity current position bus_voltage phase_a_voltage phase_b_voltage phase_c_voltage id_measured iq_setpoint id_setpoint
+  velocity_setpoint raw_velocity window_velocity velocity_integrator_torque low_speed_torque position_setpoint position_error low_speed_state
+  velocity_proportional_torque anticogging_torque final_torque max_available_torque mt_velocity velocity_error torque_unsaturated motor_torque_saturated
+  encoder_edge_age observer_velocity encoder_delta_count encoder_shadow_count abz_velocity_torque_before_limit abz_velocity_torque_after_limit abz_velocity_torque_saturated
+  abz_vel_gain abz_vel_integrator_gain abz_observer_min_bandwidth abz_velocity_torque_limit abz_coulomb_friction_torque abz_breakaway_torque enable_low_speed_compensation
+  friction_target_torque friction_speed_ratio friction_assist_blend friction_no_progress_time friction_recovery_timer friction_forward_velocity friction_reverse_detected
+  anticogging_scan_phase anticogging_progress_percent anticogging_scan_velocity anticogging_scan_velocity_error
+  window_velocity_100ms observer_bandwidth velocity_estimator_disagreement abz_count_glitch_count
 ```
 
-上位机按 20 ms（目标 50 Hz）请求快帧。
+上位机按 20 ms（目标 50 Hz）请求快帧。`respond()` 缓冲为 1024 字节，经协议
+测试精确验证 worst-case 行长为 757 字符；若 snprintf 报告不满足，固件丢弃
+整帧而非发送截断记录。
 
-`@` 后前十个字段保持兼容，随后附加子模块诊断和控制许可状态：
+`@` 后前十个字段保持兼容，随后附加子模块诊断和控制许可状态（末尾追加
+`anticogging_rejected_estimator_samples`）：
 
 ```text
 @ state fault velocity current position bus_voltage fet_temperature observer_locked angle_error mode motor_error encoder_error controller_error sensorless_error armed_state encoder_ready motor_calibrated direction fet_thermistor_error motor_thermistor_error control_mode phase_a_voltage phase_b_voltage phase_c_voltage id_measured iq_setpoint id_setpoint anticogging_valid anticogging_active anticogging_index
 ```
 
-- `velocity`：机械转速，单位 turn/s；
+- `velocity`：机械转速，单位 turn/s。ABZ 速度/位置闭环时为
+  **control observer 速度（速度 PI 实际反馈）**；其他模式为编码器 PLL 速度；
 - `current`：PWM 使能时测得的 q 轴电流，单位 A；`Idle` 或 PWM 关闭时为 0；
 - `position`：机械位置，单位 turn；
 - `bus_voltage`：母线电压，单位 V；
@@ -58,18 +70,27 @@
 - `id_measured`、`iq_setpoint`、`id_setpoint`：d/q 轴电流诊断量，单位 A；
   `Idle` 或 PWM 关闭时为 0。
 - `velocity_setpoint`：级联位置/速度控制器使用的速度给定，单位 turn/s；
-- `raw_velocity`、`window_velocity`：编码器 PLL 原始速度和 ABZ 50 ms 滚动计数窗口速度，
-  单位 turn/s；非 ABZ 模式下窗口值仅用于诊断；
-- `velocity_integrator_torque`、`low_speed_torque`：速度积分和低速起动补偿各自贡献的
-  转矩，单位 Nm；
+- `raw_velocity`：编码器 PLL 原始速度（commutation/应急超速层），单位 turn/s；
+- `window_velocity`、`window_velocity_100ms`：ABZ 50 ms / 100 ms 滚动计数窗口
+  速度，单位 turn/s，仅诊断（不进入电角度、不进入速度 PI）；
+- `observer_velocity`：control observer 速度，单位 turn/s；ABZ 速度/位置闭环
+  的唯一速度 PI 反馈；
+- `observer_bandwidth`：observer 当前有效带宽（自适应），单位 Hz；
+- `mt_velocity`：M/T (count-time) 边沿诊断速度，单位 turn/s；
+- `velocity_estimator_disagreement`：`observer_velocity - window_velocity`，
+  单位 turn/s，仅诊断；
+- `abz_count_glitch_count`：单 tick `|delta_enc|` 超过物理合理上界的累计次数，
+  仅诊断、不 fault；
+- `velocity_integrator_torque`、`low_speed_torque`：速度积分和低速摩擦补偿各自
+  贡献的转矩，单位 Nm；
 - `position_setpoint`、`position_error`：轨迹位置给定和当前级联位置误差，单位 turn；
 - `low_speed_state`：0/1/2/3 分别表示空闲、运行、起动和恢复状态；
 - `anticogging_index`：双向扫描的总进度，`0～1800` 为正转 6 圈，`1800～3600`
   为反转 6 圈；完成后 `anticogging_valid=1`。
 
-`b axis` 使用与普通速度模式相同的 `0.3 turn/s²` 平滑升速至 `+2 turn/s`，正转采集
-6 圈，再平滑换向至 `-2 turn/s` 反转采集 6 圈，最后减速至实测速度低于
-`0.05 turn/s` 后进入 `Idle`（正常耗时约 35～40 秒）。
+`b axis` 使用与普通速度模式相同的平滑升速至 `+2 turn/s`，正转采集
+6 圈，再平滑换向至 `-2 turn/s` 反转采集 6 圈，最后减速进入 `Idle`
+（正常耗时约 35～40 秒）。
 每个位置分别计算正反方向的平均维持转矩，再将两者平均以抵消摩擦和控制相位偏差；
 缺少任一方向样本的位置写为零补偿。
 
@@ -78,16 +99,15 @@ FOC Studio 的位置/速度/扭矩路径在切换控制模式时会清除未使�
 0.60 turn/s² 加减速，避免旧 NVM 参数产生过快移动；扭矩命令仍走基础
 `c axis torque` 和 `PASSTHROUGH` 输入。
 
-速度模式临时使用 `VEL_RAMP`、速度增益 0.0025、速度积分 0.01、速度斜坡
-0.3 turn/s²。ABZ 速度和位置级联环使用 50 ms 滚动计数窗口，2.5 turn/s 以下保持窗口
-反馈，超过 2.5 turn/s 后才与 PLL 平滑混合；混合结果再经 6～12 Hz 速度相关低通后同时进入 P/I。低速起动恢复要求
-累计正向移动 3 个计数，孤立边沿和原地计数回摆不会清除堵转计时；低速越齿转矩采用
-0.004～0.018 Nm 的平滑斜坡，并按正向速度误差提供限幅助推和低速保持项；0.5 turn/s 以下允许使用扩展上限。越齿恢复后，0.5～1.0 turn/s 保持 0.014 Nm 的运行基准，随后在 1.0～2.0 turn/s 线性退回 0.004 Nm，避免电机刚越齿又因补偿回落而停转；控制器在 2.0 turn/s 以下保持完整补偿，仅在 2.0～2.5 turn/s 的反馈变密区间逐步淡出。只有编码器累计前进且实测速度持续达到目标的 55% 后才退出脱困，避免低速越齿后过早卸载。补偿在 2.0～2.5 turn/s 之间逐步退出；ABZ 积分转矩在
-1.0～1.75 turn/s 之间由 0 平滑放开至 0.0045 Nm。
-窗口速度采用 50 ms 滚动窗口，只进入级联外环和速度遥测，
-不改写编码器原始估算，因此扭矩模式、电流限速和 FOC 相位推进保持原路径。离开 ABZ
-速度/位置级联模式、急停、切换反馈模式或故障回到 Idle 后，固件立即清除低速状态。
-`ss` 只允许在所有轴均为 Idle 时执行，并会先恢复速度模式的临时参数。
+速度模式进入时使用 `VEL_RAMP`，`vel_setpoint_` 以实测速度初始化（ABZ 优先级：
+control observer → 50 ms 窗口 → M/T → 编码器 PLL → 0），避免切换瞬态 torque
+impulse。ABZ 速度/位置级联环的**唯一速度反馈是 control observer**
+（`abz_vel_gain`/`abz_vel_integrator_gain`，自适应带宽 15～50 Hz，增量
+delta_count 驱动、本地帧 rebase）；50/100 ms 窗口与 M/T 仅诊断。overspeed
+为双层限定检测（observer 对正常限 + raw PLL/50 ms 窗口对 2× 应急限，连续
+16 周期），单周期 spike 不停机。低速摩擦补偿只使用 observer 反馈。离开 ABZ
+速度/位置级联模式、急停、切换反馈模式或故障回到 Idle 后，固件立即清除低速
+状态。`ss` 只允许在所有轴均为 Idle 时执行，并会先恢复速度模式的临时参数。
 
 上位机必须先读取设备参数才能批量写入，并且只写实际修改的可编辑项。电机方向、
 极对数、编码器 CPR、电阻、电感和预校准标志不参与批量写入，防止默认值覆盖校准结果。

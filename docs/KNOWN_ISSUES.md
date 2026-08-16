@@ -28,5 +28,6 @@
 
 | 问题 | 文件 / 函数 | 原因与风险 | 建议 |
 |---|---|---|---|
+| 原始 ODrive 线性位置 / PLL 长期计数技术债 | `Encoder::shadow_count_` (int32)、`pos_estimate_counts_`/`pos_cpr_counts_` (float)、`Encoder::update()` PLL 路径 | 已证明：ABZ **control velocity observer** 已改为增量 delta 驱动 + 本地帧 rebase（`mechanical_count_` int64 供诊断），不受 int32 `shadow_count_` 溢出与绝对 float 精度影响（见 `docs/ABZ_VELOCITY_ESTIMATION.md`）。但**整个 Encoder 原始路径并未消除该风险**：`shadow_count_` 是 int32，4000 CPR 下 2 turn/s 约 3.1 天、10 turn/s 约 15 小时溢出；`pos_estimate_counts_` 等绝对 float 位置在超过 ~2^24 个 count（约 4194 圈）后丢失单 count 分辨率。这是独立技术债，本轮**不修改** electrical phase / commutation 路径。 | 后续独立任务评估：commutation 用 `count_in_cpr_`（wrap 后小整数）继续，位置/诊断路径迁到 int64 或定期 rebase；不改 Clarke/Park/SVPWM 与电角度来源。 |
 | 文档与实际快照不一致 | `README.md` 旧链接 | 已证明：原 README 指向不存在的 docs 并使用固定 `D:\\foc2` 路径。 | 本阶段已改为现有文档和 `<repository-root>`。 |
 | 固件 doctest 未纳入根测试 | `Firmware/Tests/test_runner.cpp` | 已证明：已有 filter/compensator tests，但根脚本不运行它们。 | 下一测试 commit 接入标准 runner/CI。 |

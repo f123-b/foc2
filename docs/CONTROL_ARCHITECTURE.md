@@ -21,7 +21,8 @@ FOC Studio / other host
 ## ABZ speed feedback path
 
 For incremental encoders, `Encoder::update()` maintains the normal PLL
-(`vel_estimate_`, drives commutation / phase interpolation / safety), plus
+(`vel_estimate_`, drives commutation / phase interpolation; also the emergency
+overspeed layer, see below), plus
 mechanical diagnostics that never enter the electrical angle path:
 
 ```text
@@ -29,7 +30,7 @@ timer count -> delta_enc -> shadow_count_ (int32, commutation fast path)
                        +-> mechanical_count_ (int64, diagnostics)
                        +-> 50/100 ms true sliding window (shared ring buffer)
                        +-> M/T (count-time) estimator (edge diagnostic)
-                       +-> encoder PLL -> raw_velocity (commutation / safety)
+                       +-> encoder PLL -> raw_velocity (commutation / emergency overspeed layer)
 
 Controller::update() (ABZ velocity/position mode):
    delta_position = last_delta_count_ / CPR
@@ -50,6 +51,25 @@ loop feedback, so there is no estimator hand-over discontinuity. The old
 command-speed PLL/window blend and the VelocityFeedbackFilter LPF have been
 removed. See [ABZ 机械测速架构](ABZ_VELOCITY_ESTIMATION.md) for the full
 estimator-by-estimator description.
+
+## Overspeed safety (dual-layer qualified detection)
+
+The velocity PI feedback stays exclusively the ABZ control observer, but the
+overspeed protection is a separate dual-layer qualified detector
+(`AbzOverspeedQualifier`, 16-cycle consecutive qualification shared by both
+layers):
+
+- Layer A (normal): the ABZ control feedback (observer) exceeds
+  `vel_limit * vel_limit_tolerance`;
+- Layer B (emergency): the raw encoder PLL **or** the 50 ms count window
+  exceeds `2 * normal_limit`, so a real runaway is not entirely dependent on
+  the low-bandwidth observer.
+
+A single raw PLL spike never drops PWM; a sustained violation (either layer)
+latches ERROR_OVERSPEED. Non-ABZ modes keep the raw-PLL-vs-normal-limit
+qualification. This is the exact overspeed architecture the code implements —
+the encoder PLL drives commutation / phase interpolation, not the overspeed
+decision by itself.
 
 ## ABZ-specific stages and their consequences
 

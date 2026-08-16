@@ -125,9 +125,15 @@ TIM encoder counter (16-bit)
   0.5 Hz 时重算（`set_bandwidth` 内部 epsilon 判断），稳态指令下每 tick
   只做一次带宽插值（几次乘法），无除法、无重算。
 - 生命周期：`Controller::reset()` 置 `control_observer_valid_ = false`；
-  下一个 ABZ 控制 tick 用 `reset(position, initial_velocity)` 初始化，
-  `initial_velocity` 优先级：50 ms 窗口 valid → M/T valid → 0。这样
-  **旋转中切入速度模式不会从 0 启动造成 torque impulse**。
+  下一个 ABZ 控制 tick 用 `reset(position, initial_velocity)` 初始化。
+  `initial_velocity` 优先级（与 `set_foc_control_mode()` 的 setpoint 种子
+  共用同一个 `abz_observer_seed_velocity()` helper，见
+  `MotorControl/abz_velocity_utils.hpp`）：
+  50 ms 窗口 valid → window50 → M/T valid → mtVelocity →
+  encoder vel estimate valid && finite → encoder PLL → 0。这样
+  **旋转中切入速度模式不会从 0 启动造成 torque impulse**，即使窗口刚
+  reset / 刚切模式，observer 初始化也不会与 raw PLL 初始化出的
+  `vel_setpoint_` 产生瞬时速度误差。
 
 ### 4.4 50 ms rolling window（`velocity_window_50ms_`）
 
@@ -203,6 +209,51 @@ FOC Studio 主速度曲线（`velocity`）== 速度 PI 实际反馈
 避免测量噪声反馈进带宽选择造成 estimator chatter；连续插值、无硬切换，
 闭环连续。
 
+## 7.5 Overspeed safety（双层限定检测）
+
+速度 PI 反馈保持唯一使用 ABZ control observer；overspeed 保护是**独立于
+PI 的双层限定检测**（`AbzOverspeedQualifier`，见 `abz_velocity_utils.hpp`），
+两层共用一个连续周期计数器（16 个控制周期 = 2 ms）：
+
+| 层 | 判据 | 目的 |
+|---|---|---|
+| A. 正常层 | control observer（PI 实际反馈）超过正常限 `vel_limit * vel_limit_tolerance` | 正常超速检测；观测器稳态噪声不会误停 |
+| B. 应急层 | raw encoder PLL **或** 50 ms count window 超过更高应急限（正常限 × 2） | 真正的 runaway 不依赖低带宽 observer 的响应速度 |
+
+- **raw PLL 单个 spike 不停机**：只有 1 个周期触发应急层时计数不累计到
+  16，下一周期即复位；
+- **observer 正常波动不误停**：正常层判据就是 observer 本身，波动不超限
+  不触发；
+- **真正 runaway 不会被低带宽 observer 拖慢**：raw PLL / 50 ms 窗口在
+  应急限（2×正常限）连续 16 周期超限即故障。
+- 非 ABZ 模式（SPI / sensorless / torque）保持原行为：raw PLL 对正常限做
+  同样的 16 周期限定。
+- 应急限取 `normal_limit * 2.0`：FOC 默认 vel_limit=20、tolerance=1.2 时
+  正常限 24、应急限 48 turn/s；齿槽标定扫描期间 vel_limit 被压到 3 时
+  正常限 3.6、应急限 7.2 turn/s。
+
+与代码一致性的说明：commutation 的 encoder PLL 仍负责电角度插值/预测，
+但 **overspeed 不再"只看 observer"，也不再声称"PLL 单点 safety"**——文档
+与代码统一为上面的双层限定。
+
+## 7.6 ABZ count glitch 检测（诊断，不 fault）
+
+`abzCountGlitchCount` 计数单 tick `|delta_enc|` 超过物理合理上界的次数：
+
+```
+plausible_speed = max(|command|, |observer|, |window50|)
+threshold       = max(2, ceil(3 * plausible_speed * CPR * period))
+```
+
+- 依据**当前速度包络**（指令、observer、50 ms 窗口三者最大）而非仅指令，
+  因此外力拖动、超调、减速、`command=0` 而转子仍在转等**合法高速 count
+  流不会被不断标记为 glitch**（观测器/窗口会抬升包络阈值）；
+- raw PLL **不参与**包络：PLL 正是毛刺时跳变的信号，纳入会把阈值抬到
+  毛刺之下；
+- 明显不可能的单个 delta spike（远高于包络）仍会计数 +1；
+- 该计数仅 telemetry，**绝不 fault**；用于 ABZ 信号完整性诊断（见第 8 节
+  判读规则 E）。
+
 ## 8. FOC Studio 如何判读
 
 在“示波器”页使用两个新预设：**“速度估算诊断”**（Velocity Setpoint、
@@ -252,4 +303,18 @@ P Torque、I Torque、Friction Torque、Final Torque）。
 - FOC Studio 旧字段保留 alias（`velocity`/`rawVelocity`/`windowVelocity`/
   `mTVelocity`/`controlObserverVelocity`），新 UI 使用规范名。
 - fast telemetry `g` 追加 4 个字段（100 ms 窗口、有效带宽、估算器分歧、
-  计数毛刺计数），`respond()` buffer 扩到 512；协议测试验证 56 字段对齐。
+  计数毛刺计数），`respond()` buffer 扩到 **1024**；协议测试从固件格式串
+  精确计算 worst-case 行长（57 字面字符 + 46×13 + 7×10 + 2×11 + 1×10
+  = **757 字符**）并验证 < 1024；`respond()` 在 snprintf 返回负值或不满足
+  时**丢弃整帧**而非发送截断记录，host parser 永不收到残缺帧。
+
+## 12. 长期运行：shadow_count 与浮点精度边界
+
+- **ABZ control velocity observer 已不受影响**：observer 输入是每 tick 的
+  `delta_count / CPR`（增量），内部维护本地帧并在 |位置| > 8 圈时 rebase，
+  与 int32 `shadow_count_` 溢出、绝对 float 位置精度无关；`mechanical_count_`
+  （int64）仅为诊断/位置跟踪服务，永不溢出。
+- **未声称整个 encoder 路径已解决 long-run overflow**：原始 ODrive 路径
+  `shadow_count_`（int32）与 `pos_estimate_counts_`/`pos_cpr_counts_`
+  （绝对 float）在超长运行下仍有溢出/精度风险（见 `docs/KNOWN_ISSUES.md`
+  P3）。这是独立技术债；本轮**不修改** electrical phase / commutation 路径。
