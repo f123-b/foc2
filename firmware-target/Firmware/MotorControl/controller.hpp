@@ -53,6 +53,14 @@ public:
         // loop, and FOC Studio must write exactly these when tuning ABZ.
         float abz_vel_gain = 0.002f;                 // [Nm/(turn/s)]
         float abz_vel_integrator_gain = 0.002f;      // [Nm/(turn/s * s)]
+        // ABZ velocity-control-only low-speed PI scheduling. Below schedule_start
+        // the effective gains are the low-speed gains; above schedule_end they are
+        // the base gains. The handoff uses smoothstep, never a hard switch.
+        bool enable_abz_low_speed_gain_scheduling = true;
+        float abz_low_speed_vel_gain = 0.004f;            // [Nm/(turn/s)]
+        float abz_low_speed_vel_integrator_gain = 0.0025f;// [Nm/(turn/s * s)]
+        float abz_low_speed_gain_schedule_start = 0.5f;   // [turn/s]
+        float abz_low_speed_gain_schedule_end = 1.2f;     // [turn/s]
         // Control velocity observer adaptive bandwidth bounds [Hz].  The
         // observer bandwidth follows the commanded speed (see
         // AbzVelocityObserver): ~15 Hz at standstill rising smoothly to
@@ -79,14 +87,36 @@ public:
         float friction_assist_reengage_rate = 0.080f;     // [Nm/s]
         float friction_recovery_release_rate = 0.020f;    // [Nm/s]
         float friction_disable_fall_rate = 0.60f;         // [Nm/s]
+        // Continuous running friction feed-forward. The static-friction hold
+        // fades smoothly to zero at friction_running_assist_fade_speed.
+        float friction_running_hold_ratio = 0.70f;        // [0,1]
+        float friction_running_assist_fade_speed = 1.0f;  // [turn/s]
+        // BREAKAWAY exit requires net directional progress, speed ratio and a
+        // sustained qualification timer, not just the first few encoder counts.
+        int32_t friction_breakaway_exit_progress_counts = 24;
+        float friction_breakaway_exit_speed_ratio = 0.50f;// [0.4,0.6]
+        float friction_breakaway_exit_confirm_time = 0.040f; // [s]
         // Anticogging feed-forward tuning.
         float anticogging_phase_offset_bins = 0.0f;       // bin, -180..+180
         float anticogging_torque_limit = 0.005f;          // [Nm] map clamp
+        // The velocity scan's map is empirically opposite to the low-speed
+        // torque direction on this ABZ setup. Apply its polarity and extra
+        // low-speed strength only in ABZ velocity control; position/SPI/
+        // sensorless/torque behavior remains unchanged.
+        float abz_anticogging_polarity = -1.0f;            // -1 or +1
+        float abz_anticogging_low_speed_boost = 3.0f;      // >= 1
+        float abz_anticogging_low_speed_fade_speed = 1.2f; // [turn/s]
         // Anticogging bidirectional scan tuning (used on next calibration).
         float anticogging_scan_speed = 2.0f;              // [turn/s]
-        float anticogging_scan_velocity_tolerance = 0.5f; // [turn/s]
-        float anticogging_scan_dwell_time = 0.15f;        // [s]
-        float anticogging_scan_turns = 6.0f;              // turns/direction
+        // The bidirectional scan must be appreciably steadier than the 2 turn/s
+        // command before it records a position bin. More turns improve the
+        // forward/reverse average and reject velocity-loop transient torque.
+        float anticogging_scan_velocity_tolerance = 0.25f; // [turn/s]
+        float anticogging_scan_dwell_time = 0.25f;         // [s]
+        float anticogging_scan_turns = 10.0f;              // turns/direction
+        // Bound each motion/settling phase. A scan that cannot reach its
+        // accepted speed must fail safely instead of rotating indefinitely.
+        float anticogging_scan_phase_timeout = 15.0f;      // [s]
         uint16_t anticogging_postprocess_bins_per_cycle = 4;
         float anticogging_calibration_accel = 2.0f;       // [turn/s^2]
         float anticogging_calibration_torque_limit = 0.015f; // [Nm]
@@ -185,6 +215,9 @@ public:
     // cycle. The bidirectional cogging scan samples this rather than I alone.
     float velocity_loop_torque_ = 0.0f;
     float velocity_proportional_torque_ = 0.0f;
+    float effective_abz_vel_gain_ = 0.0f;
+    float effective_abz_vel_integrator_gain_ = 0.0f;
+    float abz_low_speed_gain_blend_ = 0.0f;
     float anticogging_torque_ = 0.0f;
     float anticogging_effective_scale_ = 0.0f;
     float final_torque_ = 0.0f;
@@ -200,10 +233,14 @@ public:
     float low_speed_friction_torque_ = 0.0f;
     uint8_t low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
     float friction_target_torque_ = 0.0f;
+    float friction_continuous_torque_ = 0.0f;
+    float friction_breakaway_extra_torque_ = 0.0f;
     float friction_speed_ratio_ = 0.0f;
     float friction_assist_blend_ = 0.0f;
+    float friction_running_assist_blend_ = 0.0f;
     float friction_no_progress_time_ = 0.0f;
     float friction_recovery_timer_ = 0.0f;
+    float friction_breakaway_exit_timer_ = 0.0f;
     float friction_forward_velocity_ = 0.0f;
     bool friction_reverse_detected_ = false;
     // ABZ mechanical velocity observer: the SINGLE feedback source of the ABZ
@@ -265,6 +302,8 @@ public:
 
     // Cogging calibration diagnostics.
     float anticogging_dwell_time_ = 0.0f;
+    float anticogging_phase_elapsed_ = 0.0f;
+    float anticogging_scan_command_speed_ = 0.0f;
     float anticogging_progress_percent_ = 0.0f;
     float anticogging_scan_velocity_ = 0.0f;
     float anticogging_scan_velocity_error_ = 0.0f;

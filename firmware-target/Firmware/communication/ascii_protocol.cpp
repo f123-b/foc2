@@ -40,9 +40,8 @@ static Introspectable root_obj = ODriveTypeInfo<ODrive>::make_introspectable(odr
 // Buffer sizing is verified by the host protocol test
 // (host/foc-studio/test_protocol.mjs, fastTelemetryWorstCaseLength), which
 // extracts the firmware's own format string and computes the absolute worst
-// case per specifier: the 56-field `g` record is 57 literal chars +
-// 46 * 13 (%.6g of a double, e.g. "-1.23457e+308") + 7 * 10 (%u) +
-// 2 * 11 (%ld) + 1 * 10 (%lu) = 757 chars, so 1024 bytes is the verified safe
+// case per specifier. Keep the matching count assertions in the host test in
+// sync whenever this append-only `g` record changes; 1024 bytes is verified safe
 // size with margin.  As defense in depth, if snprintf ever returns a negative
 // value (encoding error) or a value that does not fit the buffer, the frame is
 // DROPPED instead of emitting a truncated record: a partial telemetry line
@@ -440,12 +439,11 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
             const float v_alpha = power_stage_active ? current_control.final_v_alpha : 0.0f;
             const float v_beta = power_stage_active ? current_control.final_v_beta : 0.0f;
             axis->watchdog_feed();
-            // Worst-case line length: 105 literal chars + 56 specifiers.  Each
-            // %.6g of a float-range double prints at most ~12 chars, %u/%lu at
-            // most 10, so the record never exceeds ~500 chars.  512 bytes of
-            // stack is the safe bound.
+            // The append-only g record has 64 fields. Its exact worst-case
+            // bound is asserted by host/foc-studio/test_protocol.mjs and stays
+            // below respond()'s 1024-byte output buffer.
             respond(response_channel, use_checksum,
-                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %.6g %.6g %.6g %.6g %.6g %.6g %lu",
+                    "! %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %ld %ld %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %.6g %.6g %.6g %.6g %.6g %.6g %u %u %.6g %.6g %.6g %.6g %.6g %.6g %lu %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g",
                     (unsigned)axis->current_state_, (double)velocity, (double)reported_current,
                     (double)axis->encoder_.pos_estimate_, (double)vbus_voltage,
                     (double)v_alpha,
@@ -497,7 +495,15 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink& 
                     (double)axis->encoder_.velocity_window_100ms_,
                     (double)axis->controller_.observer_bandwidth_,
                     (double)axis->controller_.velocity_estimator_disagreement_,
-                    (unsigned long)axis->controller_.abz_count_glitch_count_);
+                    (unsigned long)axis->controller_.abz_count_glitch_count_,
+                    (double)axis->controller_.friction_continuous_torque_,
+                    (double)axis->controller_.friction_breakaway_extra_torque_,
+                    (double)axis->controller_.friction_running_assist_blend_,
+                    (double)axis->controller_.friction_breakaway_exit_timer_,
+                    (double)axis->controller_.effective_abz_vel_gain_,
+                    (double)axis->controller_.effective_abz_vel_integrator_gain_,
+                    (double)axis->controller_.abz_low_speed_gain_blend_,
+                    (double)axis->controller_.anticogging_effective_scale_);
         }
 
     } else if (cmd[0] == 'j') { // FOC Studio aggregate telemetry

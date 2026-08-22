@@ -240,7 +240,11 @@ export function parseFastTelemetry(line) {
     anticoggingCalibrationPhase = 0, anticoggingProgressPercent = 0,
     anticoggingScanVelocity = 0, anticoggingScanVelocityError = 0,
     velocityWindow100ms = 0, observerBandwidth = 0,
-    velocityEstimatorDisagreement = 0, abzCountGlitchCount = 0] = values;
+    velocityEstimatorDisagreement = 0, abzCountGlitchCount = 0,
+    frictionContinuousTorque = 0, frictionBreakawayExtraTorque = 0,
+    frictionRunningAssistBlend = 0, frictionBreakawayExitTimer = 0,
+    effectiveAbzVelGain = 0, effectiveAbzVelIntegratorGain = 0,
+    abzLowSpeedGainBlend = 0, anticoggingEffectiveScale = 0] = values;
   return {
     axisState: AXIS_STATE[state] ?? `状态 ${state}`,
     stateCode: state,
@@ -259,6 +263,14 @@ export function parseFastTelemetry(line) {
     observerBandwidth,
     velocityEstimatorDisagreement,
     abzCountGlitchCount,
+    frictionContinuousTorque,
+    frictionBreakawayExtraTorque,
+    frictionRunningAssistBlend,
+    frictionBreakawayExitTimer,
+    effectiveAbzVelGain,
+    effectiveAbzVelIntegratorGain,
+    abzLowSpeedGainBlend,
+    anticoggingEffectiveScale,
     current,
     position,
     busVoltage,

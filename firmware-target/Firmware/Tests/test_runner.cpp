@@ -286,28 +286,34 @@ TEST_SUITE("friction_compensator") {
     constexpr float coulomb_torque = 0.0015f;
     constexpr float breakaway_torque = 0.0055f;
 
-    TEST_CASE("running applies coulomb feed-forward in the command direction") {
+    TEST_CASE("running retains smooth low-speed holding feed-forward") {
         FrictionCompensator compensator;
         FrictionCompensationResult result;
         for (int i = 0; i < 4000; ++i) {
             result = compensator.update(
                     true, 0.5f, 0.5f, 0.0f, i / 10, dt);
         }
+        const float expected = coulomb_torque + 0.5f * 0.70f *
+                (breakaway_torque - coulomb_torque);
         CHECK(result.state == FrictionCompensator::STATE_RUNNING);
-        CHECK(result.friction_torque == doctest::Approx(
-                coulomb_torque).epsilon(0.02f));
+        CHECK(result.running_assist_blend == doctest::Approx(0.5f).epsilon(0.02f));
+        CHECK(result.continuous_torque == doctest::Approx(expected).epsilon(0.02f));
+        CHECK(result.friction_torque == doctest::Approx(expected).epsilon(0.02f));
     }
 
-    TEST_CASE("feed-forward fades toward zero near zero command") {
-        FrictionCompensator compensator;
-        FrictionCompensationResult result;
+    TEST_CASE("running hold is strongest near zero and fades out by one turn per second") {
+        FrictionCompensator low_speed;
+        FrictionCompensator high_speed;
+        FrictionCompensationResult low;
+        FrictionCompensationResult high;
         for (int i = 0; i < 4000; ++i) {
-            result = compensator.update(
-                    true, 0.005f, 0.005f, 0.0f, i / 10, dt);
+            low = low_speed.update(true, 0.005f, 0.005f, 0.0f, i / 10, dt);
+            high = high_speed.update(true, 1.0f, 1.0f, 0.0f, i / 10, dt);
         }
-        // 0.005 / 0.02 = 0.25 of the coulomb level, never full coulomb.
-        CHECK(result.friction_torque < coulomb_torque);
-        CHECK(result.friction_torque > 0.0f);
+        CHECK(low.continuous_torque > coulomb_torque);
+        CHECK(low.continuous_torque < breakaway_torque);
+        CHECK(high.continuous_torque == doctest::Approx(coulomb_torque).epsilon(0.02f));
+        CHECK(high.running_assist_blend == 0.0f);
     }
 
     TEST_CASE("breakaway engages when stalled with persistent error") {
@@ -348,8 +354,43 @@ TEST_SUITE("friction_compensator") {
                     true, 0.2f, 0.2f, 0.0f, count, dt);
         }
         CHECK(result.state == FrictionCompensator::STATE_RUNNING);
-        CHECK(result.friction_torque <=
-                coulomb_torque + 0.0001f);
+        CHECK(result.friction_torque == doctest::Approx(
+                result.continuous_torque).epsilon(0.02f));
+        CHECK(result.continuous_torque > coulomb_torque);
+    }
+
+    TEST_CASE("breakaway does not release after only a few encoder counts") {
+        FrictionCompensator compensator;
+        for (int i = 0; i < 12000; ++i)
+            compensator.update(true, 0.2f, 0.0f, 0.2f, 0, dt);
+
+        FrictionCompensationResult result;
+        for (int i = 0; i < 100; ++i) {
+            result = compensator.update(true, 0.2f, 0.2f, 0.0f, 4, dt);
+        }
+        CHECK(result.state == FrictionCompensator::STATE_BREAKAWAY);
+        CHECK(result.breakaway_exit_timer == 0.0f);
+    }
+
+    TEST_CASE("breakaway exit requires sustained progress and speed") {
+        FrictionCompensator compensator;
+        for (int i = 0; i < 12000; ++i)
+            compensator.update(true, 0.2f, 0.0f, 0.2f, 0, dt);
+
+        FrictionCompensationResult result;
+        int32_t count = 0;
+        for (int i = 0; i < 200; ++i) {
+            count += 4;
+            result = compensator.update(true, 0.2f, 0.2f, 0.0f, count, dt);
+        }
+        CHECK(result.breakaway_exit_timer > 0.0f);
+        CHECK(result.state == FrictionCompensator::STATE_BREAKAWAY);
+
+        for (int i = 0; i < 200; ++i) {
+            count += 4;
+            result = compensator.update(true, 0.2f, 0.2f, 0.0f, count, dt);
+        }
+        CHECK(result.state == FrictionCompensator::STATE_RECOVERING);
     }
 
     TEST_CASE("direction reversal cannot reuse positive compensation") {
@@ -427,10 +468,11 @@ TEST_SUITE("friction_compensator") {
     }
 
     TEST_CASE("configure clamps breakaway >= coulomb and rejects negatives") {
-        // Helper to call the full 12-arg configure with default tuning values.
+        // Helper to call the full configure signature with normal low-speed tuning.
         auto cfg = [](FrictionCompensator& c, float coulomb, float breakaway) {
             c.configure(coulomb, breakaway, 0.02f, 0.06f, 0.85f, 0.09f,
-                    0.05f, 0.02f, 0.020f, 0.080f, 0.020f, 0.60f);
+                    0.05f, 0.02f, 0.020f, 0.080f, 0.020f, 0.60f,
+                    0.70f, 1.0f, 24, 0.50f, 0.040f);
         };
         FrictionCompensator compensator;
         cfg(compensator, 0.004f, 0.002f);  // breakaway < coulomb

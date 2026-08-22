@@ -60,6 +60,10 @@ assert.deepEqual(parseFastTelemetry('! 8 1.25 -0.3 2.5 12.2 1 -0.2 -0.8 0.01 -0.
   controlVelocity: 1.25, encoderPllVelocity: 1.25, velocityWindow50ms: 1.25,
   velocityWindow100ms: 0, mtVelocity: 1.25, observerVelocity: 1.25,
   observerBandwidth: 0, velocityEstimatorDisagreement: 0, abzCountGlitchCount: 0,
+   frictionContinuousTorque: 0, frictionBreakawayExtraTorque: 0,
+   frictionRunningAssistBlend: 0, frictionBreakawayExitTimer: 0,
+   effectiveAbzVelGain: 0, effectiveAbzVelIntegratorGain: 0, abzLowSpeedGainBlend: 0,
+   anticoggingEffectiveScale: 0,
   velocitySetpoint: 0, rawVelocity: 1.25, windowVelocity: 1.25,
   mTVelocity: 1.25, controlObserverVelocity: 1.25,
   velocityIntegratorTorque: 0, lowSpeedTorque: 0, frictionTorque: 0,
@@ -92,9 +96,9 @@ assert.equal(controlTelemetry.velocityProportionalTorque, 0.0004);
 assert.equal(controlTelemetry.anticoggingTorque, -0.0008);
 assert.equal(controlTelemetry.finalTorque, 0.0041);
 assert.equal(controlTelemetry.maxAvailableTorque, 0.0254);
-// Full 56-field fast-telemetry record: the appended estimator diagnostics must
+// Full 64-field fast-telemetry record: the appended low-speed diagnostics must
 // land on their exact positions (firmware formatter and JS parser aligned).
-const fullFastFields = new Array(56).fill(0);
+const fullFastFields = new Array(64).fill(0);
 fullFastFields[0] = 8;        // axis state
 fullFastFields[1] = 0.2;      // velocity / controlVelocity
 fullFastFields[12] = 0.35;    // rawVelocity / encoderPllVelocity
@@ -106,12 +110,28 @@ fullFastFields[52] = 0.18;    // velocityWindow100ms
 fullFastFields[53] = 24.5;    // observerBandwidth (effective)
 fullFastFields[54] = -0.02;   // velocityEstimatorDisagreement
 fullFastFields[55] = 7;       // abzCountGlitchCount
-assert.equal(fullFastFields.length, 56, 'firmware fast telemetry carries 56 fields');
+fullFastFields[56] = 0.0029;  // frictionContinuousTorque
+fullFastFields[57] = 0.0018;  // frictionBreakawayExtraTorque
+fullFastFields[58] = 0.5;     // frictionRunningAssistBlend
+fullFastFields[59] = 0.04;    // frictionBreakawayExitTimer
+fullFastFields[60] = 0.004;   // effectiveAbzVelGain
+fullFastFields[61] = 0.0025;  // effectiveAbzVelIntegratorGain
+fullFastFields[62] = 0.75;    // abzLowSpeedGainBlend
+fullFastFields[63] = -2.5;    // anticoggingEffectiveScale
+assert.equal(fullFastFields.length, 64, 'firmware fast telemetry carries 64 fields');
 const parsedFull = parseFastTelemetry(`! ${fullFastFields.join(' ')}`);
 assert.equal(parsedFull.velocityWindow100ms, 0.18);
 assert.equal(parsedFull.observerBandwidth, 24.5);
 assert.equal(parsedFull.velocityEstimatorDisagreement, -0.02);
 assert.equal(parsedFull.abzCountGlitchCount, 7);
+assert.equal(parsedFull.frictionContinuousTorque, 0.0029);
+assert.equal(parsedFull.frictionBreakawayExtraTorque, 0.0018);
+assert.equal(parsedFull.frictionRunningAssistBlend, 0.5);
+assert.equal(parsedFull.frictionBreakawayExitTimer, 0.04);
+assert.equal(parsedFull.effectiveAbzVelGain, 0.004);
+assert.equal(parsedFull.effectiveAbzVelIntegratorGain, 0.0025);
+assert.equal(parsedFull.abzLowSpeedGainBlend, 0.75);
+assert.equal(parsedFull.anticoggingEffectiveScale, -2.5);
 assert.equal(parsedFull.abzObserverMinBandwidth, 15);
 assert.equal(parsedFull.controlVelocity, 0.2);
 assert.equal(parsedFull.encoderPllVelocity, 0.35);
@@ -135,10 +155,10 @@ const specifiers = [...format.matchAll(/%(?:u|ld|lu|\.6g)/g)].map((m) => m[0]);
 const literalLength = format.replace(/%(?:u|ld|lu|\.6g)/g, '').length;
 const worstValueWidth = { '%u': 10, '%ld': 11, '%lu': 10, '%.6g': 13 }; // chars
 const worstCaseLength = literalLength + specifiers.reduce((sum, s) => sum + worstValueWidth[s], 0);
-assert.equal(specifiers.length, 56, 'firmware fast telemetry format has 56 specifiers');
-assert.equal(literalLength, 57, 'g-format literal length (separators + "! ")');
-assert.equal(worstCaseLength, 57 + 46 * 13 + 7 * 10 + 2 * 11 + 1 * 10,
-  'worst-case formula matches the specifier mix (46x%.6g, 7x%u, 2x%ld, 1x%lu)');
+assert.equal(specifiers.length, 64, 'firmware fast telemetry format has 64 specifiers');
+assert.equal(literalLength, 65, 'g-format literal length (separators + "! ")');
+assert.equal(worstCaseLength, 65 + 54 * 13 + 7 * 10 + 2 * 11 + 1 * 10,
+  'worst-case formula matches the specifier mix (54x%.6g, 7x%u, 2x%ld, 1x%lu)');
 assert.ok(worstCaseLength < 1024,
   `fast telemetry worst case ${worstCaseLength} chars must fit the 1024-byte respond() buffer`);
 // A line with more fields than the parser knows must still parse (the parser
