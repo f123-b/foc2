@@ -51,7 +51,16 @@ bool Motor::arm() {
     // the control loop the correct time quota to set up modulation timings.
     if (!axis_->wait_for_current_meas())
         return axis_->error_ |= Axis::ERROR_CURRENT_MEASUREMENT_TIMEOUT, false;
+
+    // Queue a neutral SVM vector before entering WAITING_FOR_TIMINGS. A direct
+    // Idle -> closed-loop handoff can otherwise reach the PWM ISR one period
+    // before the newly scheduled controller thread has generated its first
+    // timing, which latches CONTROL_DEADLINE_MISSED despite no commanded torque.
+    // This grants exactly one zero-voltage startup period; subsequent missing
+    // control timings retain the normal deadline protection.
     next_timings_valid_ = false;
+    if (!enqueue_modulation_timings(0.0f, 0.0f))
+        return false;
     safety_critical_arm_motor_pwm(*this);
     return true;
 }

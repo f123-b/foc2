@@ -64,12 +64,20 @@ const state = {
   abzBreakawayTorque: 0,
   enableLowSpeedCompensation: 0,
   frictionTargetTorque: 0,
+  frictionContinuousTorque: 0,
+  frictionBreakawayExtraTorque: 0,
+  frictionRunningAssistBlend: 0,
+  frictionBreakawayExitTimer: 0,
   frictionSpeedRatio: 0,
   frictionAssistBlend: 0,
   frictionNoProgressTime: 0,
   frictionRecoveryTimer: 0,
   frictionForwardVelocity: 0,
   frictionReverseDetected: 0,
+  effectiveAbzVelGain: 0,
+  effectiveAbzVelIntegratorGain: 0,
+  abzLowSpeedGainBlend: 0,
+  anticoggingEffectiveScale: 0,
   anticoggingCalibrationPhase: 0,
   anticoggingProgressPercent: 0,
   anticoggingScanVelocity: 0,
@@ -463,7 +471,7 @@ function ingestLine(line) {
     state.anticoggingIndex = 0;
     dom.calibrationStatus.textContent = 'ABZ 齿槽补偿标定中';
     dom.stepCalibration.textContent = '齿槽标定中 0%';
-    showToast('齿槽标定已开始：+2 / -2 turn/s，正反各采集 6 圈，预计 30～40 秒');
+    showToast('齿槽标定已开始：+2 / -2 turn/s，正反各采集 10 圈，正在等待稳速后采样');
   }
   if (configReadQueue.length && !line.startsWith('ok ')) {
     const input = configReadQueue.shift();
@@ -561,6 +569,22 @@ const simulatedConfig = new Map([
   ['axis0.controller.config.pos_gain', '0.8'], ['axis0.controller.config.vel_gain', '0.0015'],
   ['axis0.controller.config.vel_integrator_gain', '0.005'],
   ['axis0.controller.config.vel_ramp_rate', '0.3'],
+  ['axis0.controller.config.abz_vel_gain', '0.002'],
+  ['axis0.controller.config.abz_vel_integrator_gain', '0.002'],
+  ['axis0.controller.config.enable_abz_low_speed_gain_scheduling', '1'],
+  ['axis0.controller.config.abz_low_speed_vel_gain', '0.004'],
+  ['axis0.controller.config.abz_low_speed_vel_integrator_gain', '0.0025'],
+  ['axis0.controller.config.abz_low_speed_gain_schedule_start', '0.5'],
+  ['axis0.controller.config.abz_low_speed_gain_schedule_end', '1.2'],
+  ['axis0.controller.config.friction_running_hold_ratio', '0.7'],
+  ['axis0.controller.config.friction_running_assist_fade_speed', '1'],
+  ['axis0.controller.config.friction_breakaway_exit_progress_counts', '24'],
+  ['axis0.controller.config.friction_breakaway_exit_speed_ratio', '0.5'],
+  ['axis0.controller.config.friction_breakaway_exit_confirm_time', '0.04'],
+  ['axis0.controller.config.anticogging_scan_phase_timeout', '15'],
+  ['axis0.controller.config.abz_anticogging_polarity', '-1'],
+  ['axis0.controller.config.abz_anticogging_low_speed_boost', '3'],
+  ['axis0.controller.config.abz_anticogging_low_speed_fade_speed', '1.2'],
   ['axis0.motor.config.current_control_bandwidth', '500'],
   ['axis0.encoder.config.bandwidth', '100'],
   ['axis0.motor.config.current_lim_margin', '1'],
@@ -896,7 +920,11 @@ function updateCalibrationState() {
   const readiness = `电机校准：${state.motorCalibrated ? '完成' : '未完成'} · 编码器：${state.encoderReady ? '就绪' : '未就绪'} · 方向：${state.direction || '未确定'}`;
   const coverage = Math.min(3600, Math.max(0, state.anticoggingCoverage || 0));
   const cogging = `齿槽补偿：${coggingFailed ? '标定失败' : coggingActive ? `${coggingPercent.toFixed(1)}%` : state.anticoggingValid ? `本次上电已就绪 · 有效覆盖 ${coverage}/3600` : `未标定 · 有效覆盖 ${coverage}/3600`}`;
-  dom.calibrationOutput.textContent = `${new Date().toLocaleTimeString()}  状态：${state.axisState}\n反馈：${modeLabel(state.mode)}\n${readiness}\n${cogging}\n${hasFault(state) ? currentFaultText(state) : '无故障'}`;
+  const mapQuality = `Map：RMS ${Number(state.anticoggingMapRms || 0).toFixed(5)} Nm · P-P ${Number(state.anticoggingMapPeakToPeak || 0).toFixed(5)} Nm · 相邻跳变 ${Number(state.anticoggingMapMaxJump || 0).toFixed(5)} Nm`;
+  const scan = `扫描：相位 ${state.anticoggingCalibrationPhase || 0} · 速度 ${Number(state.anticoggingScanVelocity || 0).toFixed(3)} turn/s · 速度误差 ${Number(state.anticoggingScanVelocityError || 0).toFixed(3)} turn/s`;
+  const rejected = `采样拒绝：速度 ${state.anticoggingRejectedVelocitySamples || 0} · 反向 ${state.anticoggingRejectedReverseSamples || 0} · 状态 ${state.anticoggingRejectedStateSamples || 0} · 饱和 ${state.anticoggingRejectedSaturationSamples || 0} · 估算器 ${state.anticoggingRejectedEstimatorSamples || 0}`;
+  const abortReason = { 1: '运行时故障', 2: 'map 质量门拒绝', 3: '扫描相位超时' }[state.anticoggingCalibrationAbortReason] || '';
+  dom.calibrationOutput.textContent = `${new Date().toLocaleTimeString()}  状态：${state.axisState}\n反馈：${modeLabel(state.mode)}\n${readiness}\n${cogging}\n${scan}\n${mapQuality}\n${rejected}\n${abortReason ? `标定中止：${abortReason}` : hasFault(state) ? currentFaultText(state) : '无故障'}`;
   dom.coggingCalibrationButton.disabled = state.transport === 'disconnected' ||
     state.mode !== MODE.ABZ || state.stateCode !== 1 || !state.motorCalibrated ||
     !state.encoderReady || coggingActive;
@@ -935,6 +963,13 @@ const chartSeries = Object.freeze({
   lowSpeedTorque: { label: '摩擦转矩', color: '#b45309', floor: 0.001, unit: 'Nm' },
   frictionState: { label: '摩擦状态', color: '#8b5cf6', floor: 0.001, unit: '' },
   frictionTargetTorque: { label: '摩擦目标转矩', color: '#f472b6', floor: 0.001, unit: 'Nm' },
+  frictionContinuousTorque: { label: '连续摩擦前馈', color: '#c2418c', floor: 0.001, unit: 'Nm' },
+  frictionBreakawayExtraTorque: { label: 'Breakaway 附加转矩', color: '#f59e0b', floor: 0.001, unit: 'Nm' },
+  frictionRunningAssistBlend: { label: '低速保持混合比', color: '#65a30d', floor: 0.001, unit: '' },
+  frictionBreakawayExitTimer: { label: 'Breakaway 退出确认', color: '#0f766e', floor: 0.001, unit: 's' },
+  effectiveAbzVelGain: { label: '有效 ABZ Kp', color: '#7c3aed', floor: 0.0001, unit: 'Nm/(turn/s)' },
+  effectiveAbzVelIntegratorGain: { label: '有效 ABZ Ki', color: '#2563eb', floor: 0.0001, unit: 'Nm/(turn/s*s)' },
+  abzLowSpeedGainBlend: { label: '低速增益混合比', color: '#be123c', floor: 0.001, unit: '' },
   frictionSpeedRatio: { label: '摩擦方向速度比', color: '#22d3ee', floor: 0.001, unit: '' },
   frictionAssistBlend: { label: '破槽混合比', color: '#a3e635', floor: 0.001, unit: '' },
   frictionForwardVelocity: { label: '摩擦前向速度', color: '#2dd4bf', floor: 0.01, unit: 'turn/s' },
@@ -943,6 +978,7 @@ const chartSeries = Object.freeze({
   anticoggingProgressPercent: { label: '齿槽标定进度', color: '#38bdf8', floor: 0.001, unit: '%' },
   velocityProportionalTorque: { label: '速度 P 转矩', color: '#9354c7', floor: 0.001, unit: 'Nm' },
   anticoggingTorque: { label: '齿槽补偿转矩', color: '#0f9f6e', floor: 0.001, unit: 'Nm' },
+  anticoggingEffectiveScale: { label: '有效齿槽倍率', color: '#ea580c', floor: 0.01, unit: '' },
   finalTorque: { label: '最终转矩', color: '#444ce7', floor: 0.001, unit: 'Nm' },
   torqueUnsaturated: { label: '未饱和转矩', color: '#f97316', floor: 0.001, unit: 'Nm' },
   abzVelocityTorqueBeforeLimit: { label: 'ABZ 转矩限幅前', color: '#d946ef', floor: 0.001, unit: 'Nm' },
@@ -987,14 +1023,22 @@ function captureTelemetrySample() {
     lowSpeedTorque: state.lowSpeedTorque,
     frictionState: state.frictionState,
     frictionTargetTorque: state.frictionTargetTorque,
+    frictionContinuousTorque: state.frictionContinuousTorque,
+    frictionBreakawayExtraTorque: state.frictionBreakawayExtraTorque,
+    frictionRunningAssistBlend: state.frictionRunningAssistBlend,
+    frictionBreakawayExitTimer: state.frictionBreakawayExitTimer,
     frictionSpeedRatio: state.frictionSpeedRatio,
     frictionAssistBlend: state.frictionAssistBlend,
     frictionForwardVelocity: state.frictionForwardVelocity,
     frictionReverseDetected: state.frictionReverseDetected,
+    effectiveAbzVelGain: state.effectiveAbzVelGain,
+    effectiveAbzVelIntegratorGain: state.effectiveAbzVelIntegratorGain,
+    abzLowSpeedGainBlend: state.abzLowSpeedGainBlend,
     anticoggingCalibrationPhase: state.anticoggingCalibrationPhase,
     anticoggingProgressPercent: state.anticoggingProgressPercent,
     velocityProportionalTorque: state.velocityProportionalTorque,
     anticoggingTorque: state.anticoggingTorque,
+    anticoggingEffectiveScale: state.anticoggingEffectiveScale,
     finalTorque: state.finalTorque,
     torqueUnsaturated: state.torqueUnsaturated,
     abzVelocityTorqueBeforeLimit: state.abzVelocityTorqueBeforeLimit,
@@ -1523,9 +1567,13 @@ function bindActions() {
     'iqSetpoint', 'current', 'idSetpoint', 'idMeasured', 'finalTorque', 'abzVelocityTorqueSaturated',
   ]));
   dom.scopePresetLowSpeedButton.addEventListener('click', () => applyScopePreset([
-    'velocity', 'observerVelocity', 'encoderPllVelocity',
-    'frictionState', 'frictionTargetTorque', 'lowSpeedTorque', 'frictionSpeedRatio',
-    'velocityProportionalTorque', 'velocityIntegratorTorque', 'iqSetpoint', 'current',
+    'velocitySetpoint', 'velocity', 'velocityError',
+    'velocityProportionalTorque', 'velocityIntegratorTorque',
+    'frictionContinuousTorque', 'frictionBreakawayExtraTorque', 'lowSpeedTorque',
+    'frictionBreakawayExitTimer', 'anticoggingTorque', 'anticoggingEffectiveScale',
+    'abzVelocityTorqueBeforeLimit', 'abzVelocityTorqueAfterLimit',
+    'abzVelocityTorqueSaturated', 'finalTorque', 'iqSetpoint',
+    'effectiveAbzVelGain', 'effectiveAbzVelIntegratorGain', 'abzLowSpeedGainBlend',
   ]));
   dom.scopePresetCoggingButton.addEventListener('click', () => applyScopePreset([
     'velocity', 'observerVelocity', 'iqSetpoint', 'current',
@@ -1540,8 +1588,11 @@ function bindActions() {
   // 速度环诊断: velocity loop error/torque chain.
   dom.scopePresetLoopButton.addEventListener('click', () => applyScopePreset([
     'velocitySetpoint', 'velocity', 'velocityError', 'iqSetpoint',
-    'velocityProportionalTorque', 'velocityIntegratorTorque', 'lowSpeedTorque',
-    'finalTorque',
+    'velocityProportionalTorque', 'velocityIntegratorTorque',
+    'frictionContinuousTorque', 'frictionBreakawayExtraTorque', 'lowSpeedTorque',
+    'anticoggingTorque', 'abzVelocityTorqueBeforeLimit', 'abzVelocityTorqueAfterLimit',
+    'abzVelocityTorqueSaturated', 'finalTorque',
+    'effectiveAbzVelGain', 'effectiveAbzVelIntegratorGain', 'abzLowSpeedGainBlend',
   ]));
   dom.scopeWindowSelect.addEventListener('change', () => {
     setScopeWindow(dom.scopeWindowSelect.value);

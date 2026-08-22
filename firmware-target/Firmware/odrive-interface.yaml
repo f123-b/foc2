@@ -710,6 +710,19 @@ interfaces:
           abz_vel_integrator_gain:
             type: float32
             unit: Nm/(turn/s * s)
+          enable_abz_low_speed_gain_scheduling: bool
+          abz_low_speed_vel_gain:
+            type: float32
+            unit: Nm/(turn/s)
+          abz_low_speed_vel_integrator_gain:
+            type: float32
+            unit: Nm/(turn/s * s)
+          abz_low_speed_gain_schedule_start:
+            type: float32
+            unit: turn/s
+          abz_low_speed_gain_schedule_end:
+            type: float32
+            unit: turn/s
           abz_velocity_observer_min_bandwidth:
             type: float32
             unit: Hz
@@ -741,10 +754,24 @@ interfaces:
           friction_assist_reengage_rate: float32
           friction_recovery_release_rate: float32
           friction_disable_fall_rate: float32
+          friction_running_hold_ratio: float32
+          friction_running_assist_fade_speed:
+            type: float32
+            unit: turn/s
+          friction_breakaway_exit_progress_counts: int32
+          friction_breakaway_exit_speed_ratio: float32
+          friction_breakaway_exit_confirm_time:
+            type: float32
+            unit: s
           anticogging_phase_offset_bins: float32
           anticogging_torque_limit:
             type: float32
             unit: Nm
+          abz_anticogging_polarity: float32
+          abz_anticogging_low_speed_boost: float32
+          abz_anticogging_low_speed_fade_speed:
+            type: float32
+            unit: turn/s
           anticogging_scan_speed:
             type: float32
             unit: turn/s
@@ -757,6 +784,9 @@ interfaces:
           anticogging_scan_turns:
             type: float32
             unit: turn
+          anticogging_scan_phase_timeout:
+            type: float32
+            unit: s
           anticogging_postprocess_bins_per_cycle: uint16
           anticogging_calibration_accel:
             type: float32

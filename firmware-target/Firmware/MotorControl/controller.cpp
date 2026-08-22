@@ -2,21 +2,6 @@
 #include "odrive_main.h"
 #include <algorithm>
 
-// The cogging-map scan runs at 2 turn/s, where the ABZ velocity loop has been
-// verified to rotate continuously. Sampling is only allowed when the control
-// velocity is within a tight tolerance of the requested scan velocity and the
-// mechanical state is clean (no breakaway/recovery/reverse/saturation).
-static constexpr float FOC_STUDIO_ABZ_SCAN_SPEED = 2.0f;       // turn/s
-static constexpr float FOC_STUDIO_ABZ_SCAN_RAMP_RATE = 2.0f;  // turn/s^2
-// Tight velocity gate: a 0 turn/s sample must not pass. The scan velocity is
-// held within +/-0.5 turn/s of the request before any sample is accepted.
-static constexpr float FOC_STUDIO_ABZ_SCAN_VEL_TOLERANCE = 0.5f;   // turn/s
-// Dwell at the requested velocity before sampling starts, so ramp/acceleration
-// torque is not written into the map.
-static constexpr float FOC_STUDIO_ABZ_SCAN_DWELL_TIME = 0.15f;     // s
-// Full mechanical turns scanned per direction.
-static constexpr float FOC_STUDIO_ABZ_SCAN_TURNS = 6.0f;           // turns
-
 // The position-hold cogging scan steps over the map at a coarse resolution so
 // each step is large enough for the low-speed breakaway to move the rotor (the
 // detent needs a few encoder counts to cross). 10 bins = 11 counts at 4000 CPR.
@@ -82,6 +67,8 @@ void Controller::reset(bool abort_anticogging) {
         anticogging_sample_position_valid_ = false;
         anticogging_scan_phase_ = ANTICOGGING_SCAN_IDLE;
         anticogging_dwell_time_ = 0.0f;
+        anticogging_phase_elapsed_ = 0.0f;
+        anticogging_scan_command_speed_ = 0.0f;
         anticogging_progress_percent_ = 0.0f;
         anticogging_rejected_velocity_samples_ = 0;
         anticogging_rejected_reverse_samples_ = 0;
@@ -100,6 +87,9 @@ void Controller::reset(bool abort_anticogging) {
     overspeed_qualifier_.reset();
     velocity_loop_torque_ = 0.0f;
     velocity_proportional_torque_ = 0.0f;
+    effective_abz_vel_gain_ = 0.0f;
+    effective_abz_vel_integrator_gain_ = 0.0f;
+    abz_low_speed_gain_blend_ = 0.0f;
     anticogging_torque_ = 0.0f;
     final_torque_ = 0.0f;
     velocity_error_ = 0.0f;
@@ -112,10 +102,14 @@ void Controller::reset(bool abort_anticogging) {
     low_speed_friction_torque_ = 0.0f;
     low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
     friction_target_torque_ = 0.0f;
+    friction_continuous_torque_ = 0.0f;
+    friction_breakaway_extra_torque_ = 0.0f;
     friction_speed_ratio_ = 0.0f;
     friction_assist_blend_ = 0.0f;
+    friction_running_assist_blend_ = 0.0f;
     friction_no_progress_time_ = 0.0f;
     friction_recovery_timer_ = 0.0f;
+    friction_breakaway_exit_timer_ = 0.0f;
     friction_forward_velocity_ = 0.0f;
     friction_reverse_detected_ = false;
     control_observer_velocity_ = 0.0f;
@@ -221,6 +215,8 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
         anticogging_valid_bin_count_ = 0;
         anticogging_sample_position_valid_ = false;
         anticogging_dwell_time_ = 0.0f;
+        anticogging_phase_elapsed_ = 0.0f;
+        anticogging_scan_command_speed_ = 0.0f;
         anticogging_progress_percent_ = 0.0f;
         anticogging_scan_velocity_ = 0.0f;
         anticogging_scan_velocity_error_ = 0.0f;
@@ -257,6 +253,16 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
             // need speed/current headroom during startup and reversal.
             config_.vel_limit = std::min(3.0f, config_.vel_limit);
             config_.vel_ramp_rate = config_.anticogging_calibration_accel;
+            const float requested_scan_speed = std::max(0.1f,
+                    std::abs(config_.anticogging_scan_speed));
+            const float permitted_speed = std::isfinite(config_.vel_limit) &&
+                    config_.vel_limit > 0.0f
+                    ? config_.vel_limit : requested_scan_speed;
+            // A user may intentionally configure a low velocity limit. Scan at
+            // the speed the controller can really achieve, not at an unreachable
+            // nominal target that would keep the dwell timer at zero forever.
+            anticogging_scan_command_speed_ = std::min(
+                    requested_scan_speed, permitted_speed);
             anticogging_scan_phase_ = ANTICOGGING_SCAN_RAMP_FORWARD;
             anticogging_scan_start_pos_ = anticogging_calibration_base_pos_;
             anticogging_reverse_start_pos_ = anticogging_calibration_base_pos_;
@@ -264,7 +270,7 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
             std::fill(anticogging_forward_map_, anticogging_forward_map_ + 3600, 0);
             std::fill(anticogging_forward_count_, anticogging_forward_count_ + 3600, 0);
             std::fill(anticogging_reverse_count_, anticogging_reverse_count_ + 3600, 0);
-            input_vel_ = FOC_STUDIO_ABZ_SCAN_SPEED;
+            input_vel_ = anticogging_scan_command_speed_;
         } else {
             input_pos_ = anticogging_calibration_base_pos_;
             input_vel_ = 0.0f;
@@ -289,7 +295,7 @@ void Controller::start_anticogging_calibration(bool velocity_only) {
 
 // Abort the calibration atomically: a half-finished map must never be applied.
 // reason: 0 = none, 1 = fault (motor/axis/controller/overspeed/deadline),
-// 2 = map quality gate failed.
+// 2 = map quality gate failed, 3 = scan phase timeout.
 void Controller::abort_anticogging_calibration(uint8_t reason) {
     config_.anticogging.calib_anticogging = false;
     anticogging_valid_ = false;
@@ -308,8 +314,10 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
         return false;
     }
     if (anticogging_velocity_only_) {
-        const float scan_speed = config_.anticogging_scan_speed;
-        const float tolerance = config_.anticogging_scan_velocity_tolerance;
+        const float scan_speed = std::max(0.1f,
+                anticogging_scan_command_speed_);
+        const float tolerance = std::max(0.01f,
+                std::abs(config_.anticogging_scan_velocity_tolerance));
         const float dwell_time = config_.anticogging_scan_dwell_time;
         const float scan_turns = config_.anticogging_scan_turns;
         // Clamp postprocess bins to a safe fixed set (1/2/4/8) so a bad runtime
@@ -319,14 +327,21 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                 config_.anticogging_postprocess_bins_per_cycle >= 2 ? 2 : 1;
         constexpr float torque_scale = 1000000.0f;
 
-        // Telemetry: control velocity and its error vs the requested scan
-        // velocity.
-        anticogging_scan_velocity_ = vel_estimate;
+        // The observer remains the only velocity-control feedback. For the
+        // calibration gate, however, use the already-existing 50 ms mechanical
+        // window once it is valid: a per-control-tick observer ripple must not
+        // continuously reset a 250 ms steady-speed dwell timer. This value is
+        // diagnostic/gating-only and never feeds the velocity PI.
+        const float scan_gate_velocity =
+                axis_->encoder_.velocity_window_50ms_valid_ &&
+                std::isfinite(axis_->encoder_.velocity_window_50ms_)
+                ? axis_->encoder_.velocity_window_50ms_ : vel_estimate;
+        anticogging_scan_velocity_ = scan_gate_velocity;
         const bool reverse_phase =
                 anticogging_scan_phase_ == ANTICOGGING_SCAN_RAMP_REVERSE ||
                 anticogging_scan_phase_ == ANTICOGGING_SCAN_REVERSE;
         const float requested = reverse_phase ? -scan_speed : scan_speed;
-        anticogging_scan_velocity_error_ = vel_estimate - requested;
+        anticogging_scan_velocity_error_ = scan_gate_velocity - requested;
 
         // A sample is valid only when the mechanical state is clean: velocity
         // within the tight tolerance in the scan direction, friction RUNNING,
@@ -334,10 +349,10 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
         // breakaway/recovery/saturation must not enter the cogging map.
         const auto sample_valid = [&](bool reverse) -> bool {
             const bool velocity_ok = reverse
-                    ? (vel_estimate < 0.0f &&
-                            std::abs(vel_estimate + scan_speed) <= tolerance)
-                    : (vel_estimate > 0.0f &&
-                            std::abs(vel_estimate - scan_speed) <= tolerance);
+                    ? (scan_gate_velocity < 0.0f &&
+                            std::abs(scan_gate_velocity + scan_speed) <= tolerance)
+                    : (scan_gate_velocity > 0.0f &&
+                            std::abs(scan_gate_velocity - scan_speed) <= tolerance);
             if (!velocity_ok) {
                 ++anticogging_rejected_velocity_samples_;
                 return false;
@@ -346,17 +361,28 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
             // observer and the 50 ms mechanical window disagree by more than
             // the scan tolerance. A bad estimator must not be written into the
             // cogging map; this never faults, it only rejects samples.
+            // The observer has visible control-tick ripple at the scan speed.
+            // Keep an independent disagreement guard, but only reject gross
+            // divergence rather than the normal high-frequency ripple.
+            const float disagreement_limit = std::max(0.75f, 3.0f * tolerance);
             if (axis_->encoder_.velocity_window_50ms_valid_ &&
                     std::abs(control_observer_velocity_ -
-                            axis_->encoder_.velocity_window_50ms_) > tolerance) {
+                            axis_->encoder_.velocity_window_50ms_) >
+                            disagreement_limit) {
                 ++anticogging_rejected_estimator_samples_;
                 return false;
             }
-            if (friction_reverse_detected_) {
+            // The velocity scan explicitly disables low-speed friction assist:
+            // at 2 turn/s it is unnecessary, and its slew/state transitions
+            // would otherwise bias a position-synchronous map. Keep these
+            // guards for other calibration paths, but do not require RUNNING
+            // while the ABZ bidirectional scan is intentionally friction-free.
+            if (!anticogging_velocity_only_ && friction_reverse_detected_) {
                 ++anticogging_rejected_reverse_samples_;
                 return false;
             }
-            if (low_speed_compensator_state_ != FrictionCompensator::STATE_RUNNING) {
+            if (!anticogging_velocity_only_ &&
+                    low_speed_compensator_state_ != FrictionCompensator::STATE_RUNNING) {
                 ++anticogging_rejected_state_samples_;
                 return false;
             }
@@ -385,14 +411,12 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
             if (wrapped_bin < 0)
                 wrapped_bin += 3600;
             const uint32_t index = static_cast<uint32_t>(wrapped_bin);
-            // Record the complete non-anticogging torque that maintains the
-            // constant scan speed (P + I + friction FF). The anticogging FF is
-            // forced to zero during calibration, so this is the true total
-            // mechanical torque. Averaging forward and reverse cancels the
-            // direction-only Coulomb friction.
+            // Record the pure velocity PI torque. The ABZ velocity scan runs
+            // with friction assist disabled, so a forward/reverse average keeps
+            // the position-synchronous cogging component while cancelling the
+            // real direction-dependent mechanical friction.
             const float sample = std::clamp(
-                    velocity_loop_torque_ + low_speed_friction_torque_,
-                    -0.012f, 0.012f);
+                    velocity_loop_torque_, -0.012f, 0.012f);
             if (!reverse) {
                 uint8_t& count = anticogging_forward_count_[index];
                 if (count == 0)
@@ -421,10 +445,10 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
         // range for dwell_time, so ramp/acceleration torque is not recorded.
         const auto dwell_ok = [&](bool reverse) -> bool {
             const bool velocity_ok = reverse
-                    ? (vel_estimate < 0.0f &&
-                            std::abs(vel_estimate + scan_speed) <= tolerance)
-                    : (vel_estimate > 0.0f &&
-                            std::abs(vel_estimate - scan_speed) <= tolerance);
+                    ? (scan_gate_velocity < 0.0f &&
+                            std::abs(scan_gate_velocity + scan_speed) <= tolerance)
+                    : (scan_gate_velocity > 0.0f &&
+                            std::abs(scan_gate_velocity - scan_speed) <= tolerance);
             anticogging_dwell_time_ = velocity_ok
                     ? anticogging_dwell_time_ + current_meas_period
                     : 0.0f;
@@ -436,6 +460,23 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
         current_bin = ((current_bin % 3600) + 3600) % 3600;
         anticogging_current_bin_ = static_cast<uint32_t>(current_bin);
 
+        const bool timed_motion_phase =
+                anticogging_scan_phase_ == ANTICOGGING_SCAN_RAMP_FORWARD ||
+                anticogging_scan_phase_ == ANTICOGGING_SCAN_FORWARD ||
+                anticogging_scan_phase_ == ANTICOGGING_SCAN_RAMP_REVERSE ||
+                anticogging_scan_phase_ == ANTICOGGING_SCAN_REVERSE;
+        if (timed_motion_phase) {
+            anticogging_phase_elapsed_ += current_meas_period;
+            const float timeout = std::clamp(
+                    config_.anticogging_scan_phase_timeout, 2.0f, 60.0f);
+            if (anticogging_phase_elapsed_ >= timeout) {
+                // reason 3: requested scan speed was not reached or mechanical
+                // progress did not complete in the bounded scan phase.
+                abort_anticogging_calibration(3);
+                return false;
+            }
+        }
+
         switch (anticogging_scan_phase_) {
             case ANTICOGGING_SCAN_RAMP_FORWARD:
                 input_vel_ = scan_speed;
@@ -444,6 +485,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                     anticogging_scan_start_pos_ = pos_estimate;
                     anticogging_sample_position_valid_ = false;
                     anticogging_dwell_time_ = 0.0f;
+                    anticogging_phase_elapsed_ = 0.0f;
                     anticogging_scan_phase_ = ANTICOGGING_SCAN_FORWARD;
                 }
                 break;
@@ -461,6 +503,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                 if (pos_estimate - anticogging_scan_start_pos_ >= scan_turns) {
                     input_vel_ = -scan_speed;
                     anticogging_dwell_time_ = 0.0f;
+                    anticogging_phase_elapsed_ = 0.0f;
                     anticogging_scan_phase_ = ANTICOGGING_SCAN_RAMP_REVERSE;
                 }
                 break;
@@ -470,6 +513,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                     anticogging_reverse_start_pos_ = pos_estimate;
                     anticogging_sample_position_valid_ = false;
                     anticogging_dwell_time_ = 0.0f;
+                    anticogging_phase_elapsed_ = 0.0f;
                     anticogging_scan_phase_ = ANTICOGGING_SCAN_REVERSE;
                 }
                 break;
@@ -486,6 +530,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
                 }
                 if (anticogging_reverse_start_pos_ - pos_estimate >= scan_turns) {
                     input_vel_ = 0.0f;
+                    anticogging_phase_elapsed_ = 0.0f;
                     anticogging_finalize_index_ = 0;
                     anticogging_scan_phase_ = ANTICOGGING_SCAN_FINALIZE;
                 }
@@ -974,9 +1019,33 @@ bool Controller::update(float* torque_setpoint_output) {
 
     // ABZ uses its own PI gains: the generic ODrive defaults are far too large
     // for a 4000 CPR incremental encoder, so keep them tunable and independent.
+    // The low-speed schedule is intentionally velocity-mode-only. Position,
+    // torque, SPI and sensorless paths retain their existing gains exactly.
+    effective_abz_vel_gain_ = 0.0f;
+    effective_abz_vel_integrator_gain_ = 0.0f;
+    abz_low_speed_gain_blend_ = 0.0f;
     if (cascaded_abz_mode) {
         vel_gain = std::max(0.0f, config_.abz_vel_gain);
         vel_integrator_gain = std::max(0.0f, config_.abz_vel_integrator_gain);
+        const bool abz_velocity_mode =
+                config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL;
+        if (abz_velocity_mode && config_.enable_abz_low_speed_gain_scheduling) {
+            const float start = std::max(0.0f,
+                    config_.abz_low_speed_gain_schedule_start);
+            const float end = std::max(start + 0.001f,
+                    config_.abz_low_speed_gain_schedule_end);
+            const float x = std::clamp((std::abs(vel_des) - start) / (end - start),
+                    0.0f, 1.0f);
+            const float smoothstep = x * x * (3.0f - 2.0f * x);
+            abz_low_speed_gain_blend_ = 1.0f - smoothstep;
+            vel_gain += abz_low_speed_gain_blend_ *
+                    (std::max(0.0f, config_.abz_low_speed_vel_gain) - vel_gain);
+            vel_integrator_gain += abz_low_speed_gain_blend_ *
+                    (std::max(0.0f, config_.abz_low_speed_vel_integrator_gain) -
+                     vel_integrator_gain);
+        }
+        effective_abz_vel_gain_ = vel_gain;
+        effective_abz_vel_integrator_gain_ = vel_integrator_gain;
     }
 
     // ABZ mechanical velocity observer: the SINGLE velocity feedback source of
@@ -1077,10 +1146,32 @@ bool Controller::update(float* torque_setpoint_output) {
     anticogging_torque_ = 0.0f;
     anticogging_effective_scale_ = 0.0f;
     if (anticogging_valid_ && config_.anticogging.anticogging_enabled) {
-        float anticogging_scale = 1.0f;
-        const bool abz_velocity_mode =
-                cascaded_abz_control() &&
+        float anticogging_scale = config_.anticogging.cogging_ratio;
+        const bool abz_velocity_mode = cascaded_abz_control() &&
                 config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL;
+        if (anticogging_velocity_only_ && abz_velocity_mode) {
+            // The low-speed A/B result is clear: the calibrated map must be
+            // applied in the opposite direction, with extra magnitude below
+            // the speed at which static friction and cogging dominate. This
+            // schedule is smooth and ABZ-velocity-only.
+            const float polarity = std::isfinite(config_.abz_anticogging_polarity) &&
+                    config_.abz_anticogging_polarity >= 0.0f ? 1.0f : -1.0f;
+            const float boost = std::clamp(
+                    std::isfinite(config_.abz_anticogging_low_speed_boost)
+                            ? config_.abz_anticogging_low_speed_boost : 3.0f,
+                    1.0f, 5.0f);
+            const float fade_speed = std::max(0.05f,
+                    std::isfinite(config_.abz_anticogging_low_speed_fade_speed)
+                            ? config_.abz_anticogging_low_speed_fade_speed : 1.2f);
+            const float x = std::clamp(std::abs(vel_des) / fade_speed, 0.0f, 1.0f);
+            const float smoothstep = x * x * (3.0f - 2.0f * x);
+            const float low_speed_blend = 1.0f - smoothstep;
+            anticogging_scale *= polarity *
+                    (1.0f + (boost - 1.0f) * low_speed_blend);
+        }
+        // An old user multiplier such as -3 must not combine with the new
+        // boost into -9. Keep map injection within the tested ABZ range.
+        anticogging_scale = std::clamp(anticogging_scale, -3.0f, 3.0f);
         if (anticogging_velocity_only_ && abz_velocity_mode) {
             // The map is useful precisely where cogging causes the low-speed
             // stick-slip. Blend it in gradually so enabling a completed map
@@ -1088,14 +1179,14 @@ bool Controller::update(float* torque_setpoint_output) {
             const float command_speed = std::abs(vel_des);
             const float speed_blend = std::clamp(
                     command_speed / 0.08f, 0.0f, 1.0f);
-            anticogging_scale = speed_blend;
+            anticogging_scale *= speed_blend;
         } else if (anticogging_velocity_only_) {
             // A map produced by the ABZ velocity scan is not valid for the
             // other controller modes. In particular, do not change torque
             // mode behavior.
             anticogging_scale = 0.0f;
         }
-        if (anticogging_scale > 0.0f) {
+        if (std::abs(anticogging_scale) > 0.000001f) {
             const float map_position = fmodf_pos(
                     anticogging_pos + config_.anticogging_phase_offset_bins,
                     3600.0f);
@@ -1109,9 +1200,9 @@ bool Controller::update(float* torque_setpoint_output) {
             const float clamp_limit = std::isfinite(config_.anticogging_torque_limit) &&
                     config_.anticogging_torque_limit > 0.0f
                     ? config_.anticogging_torque_limit : 0.005f;
-            anticogging_torque_ = anticogging_scale * config_.anticogging.cogging_ratio *
+            anticogging_torque_ = anticogging_scale *
                     std::clamp(map_torque, -clamp_limit, clamp_limit);
-            anticogging_effective_scale_ = anticogging_scale * config_.anticogging.cogging_ratio;
+            anticogging_effective_scale_ = anticogging_scale;
             torque += anticogging_torque_;
         }
     }
@@ -1134,6 +1225,11 @@ bool Controller::update(float* torque_setpoint_output) {
 
         v_err = vel_des - velocity_feedback;
         velocity_error_ = v_err;
+        if (cascaded_abz_mode) {
+            effective_abz_vel_gain_ = vel_gain * gain_scheduling_multiplier;
+            effective_abz_vel_integrator_gain_ =
+                    vel_integrator_gain * gain_scheduling_multiplier;
+        }
         const float proportional_torque =
                 (vel_gain * gain_scheduling_multiplier) * v_err;
         velocity_proportional_torque_ = proportional_torque;
@@ -1147,16 +1243,25 @@ bool Controller::update(float* torque_setpoint_output) {
         low_speed_friction_torque_ = 0.0f;
         low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
         friction_target_torque_ = 0.0f;
+        friction_continuous_torque_ = 0.0f;
+        friction_breakaway_extra_torque_ = 0.0f;
         friction_speed_ratio_ = 0.0f;
         friction_assist_blend_ = 0.0f;
+        friction_running_assist_blend_ = 0.0f;
         friction_no_progress_time_ = 0.0f;
         friction_recovery_timer_ = 0.0f;
+        friction_breakaway_exit_timer_ = 0.0f;
         friction_forward_velocity_ = 0.0f;
         friction_reverse_detected_ = false;
         const bool abz_velocity_mode = cascaded_abz_mode &&
                 config_.control_mode == CONTROL_MODE_VELOCITY_CONTROL;
-        const bool friction_enabled =
-                abz_velocity_mode && config_.enable_low_speed_compensation;
+        // The bidirectional anticogging velocity scan is deliberately
+        // friction-free. At its 2 turn/s scan speed breakaway assist is not
+        // needed; excluding it keeps its slew and state transitions out of the
+        // position-synchronous PI torque sample.
+        const bool friction_enabled = abz_velocity_mode &&
+                config_.enable_low_speed_compensation &&
+                !config_.anticogging.calib_anticogging;
         friction_compensator_.configure(
                 config_.abz_coulomb_friction_torque,
                 config_.abz_breakaway_torque,
@@ -1169,9 +1274,16 @@ bool Controller::update(float* torque_setpoint_output) {
                 config_.friction_breakaway_rise_rate,
                 config_.friction_assist_reengage_rate,
                 config_.friction_recovery_release_rate,
-                config_.friction_disable_fall_rate);
-        const bool ff_active = friction_enabled &&
-                std::abs(vel_des) >= config_.friction_command_threshold;
+                config_.friction_disable_fall_rate,
+                config_.friction_running_hold_ratio,
+                config_.friction_running_assist_fade_speed,
+                config_.friction_breakaway_exit_progress_counts,
+                config_.friction_breakaway_exit_speed_ratio,
+                config_.friction_breakaway_exit_confirm_time);
+        // Keep running friction FF active for every nonzero ABZ velocity
+        // command. command_threshold only gates BREAKAWAY inside the helper.
+        const bool ff_active = friction_enabled && std::isfinite(vel_des) &&
+                std::abs(vel_des) > 0.0f;
         if (ff_active) {
             const FrictionCompensationResult compensation =
                     friction_compensator_.update(
@@ -1181,10 +1293,14 @@ bool Controller::update(float* torque_setpoint_output) {
             low_speed_friction_torque_ = compensation.friction_torque;
             low_speed_compensator_state_ = compensation.state;
             friction_target_torque_ = compensation.target_torque;
+            friction_continuous_torque_ = compensation.continuous_torque;
+            friction_breakaway_extra_torque_ = compensation.breakaway_extra_torque;
             friction_speed_ratio_ = compensation.speed_ratio;
             friction_assist_blend_ = compensation.assist_blend;
+            friction_running_assist_blend_ = compensation.running_assist_blend;
             friction_no_progress_time_ = compensation.no_progress_time;
             friction_recovery_timer_ = compensation.recovery_timer;
+            friction_breakaway_exit_timer_ = compensation.breakaway_exit_timer;
             friction_forward_velocity_ = compensation.forward_velocity;
             friction_reverse_detected_ = compensation.reverse_detected;
         } else {
@@ -1203,6 +1319,15 @@ bool Controller::update(float* torque_setpoint_output) {
         friction_compensator_.clear();
         low_speed_friction_torque_ = 0.0f;
         low_speed_compensator_state_ = FrictionCompensator::STATE_IDLE;
+        friction_target_torque_ = 0.0f;
+        friction_continuous_torque_ = 0.0f;
+        friction_breakaway_extra_torque_ = 0.0f;
+        friction_speed_ratio_ = 0.0f;
+        friction_assist_blend_ = 0.0f;
+        friction_running_assist_blend_ = 0.0f;
+        friction_no_progress_time_ = 0.0f;
+        friction_recovery_timer_ = 0.0f;
+        friction_breakaway_exit_timer_ = 0.0f;
         position_low_speed_active_ = false;
     }
 
